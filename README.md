@@ -7,7 +7,7 @@ EasyKV is a Pytorch implementation of various eviction policies for key-value ca
 ## Features
 + Offer control over the memory budget allocated for the KV cache during LLM inference, with easy-to-use interface.
 + Support both prompt encoding and auto-regressive decoding.
-+ Support Multi-head Attention, Multi-query Attention, and Qrouped-query Attention.
++ Support Multi-Head Attention(MHA), Multi-Query Attention(MQA), and Grouped-Query Attention(GQA).
 + Support LLaMa, LLaMa2, and Mistral.
 + Support various stride for prompt encoding(larger stride leads to faster encoding).
 
