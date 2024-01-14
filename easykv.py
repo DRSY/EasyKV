@@ -357,9 +357,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         cache_typical_probs = []
         cache_cur_probs = []
         cache_positions = []
-        cache_attn_scores_token = [0.0] * (budget+1)
         cache_attn_scores = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-        cache_attn_diff_ema = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_attn_scores_decay_avg_std = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_attn_scores_square = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_attn_scores_binary = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -450,13 +448,16 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         threshold = torch.exp(-entropy(outputs.attentions[l][0, :, 0, :])).unsqueeze(-1) # (num_heads, 1)
                     cache_attn_scores_binary[l, :, :attention_map.shape[-1]] += (renorm_attention_map>=threshold).float()
                     cache_attn_scores_square_binary[l, :, :attention_map.shape[-1]] += ((renorm_attention_map>=threshold).float()) ** 2
+            elif 'tova' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
             # evict if current kv cache size exceeds the budget
             cur_kv_size = past_key_values[0][0].shape[2]
             if (cur_kv_size-len(prefix_token_lst)) > budget and mode != 'full':
                 cache_counter += 1.0
                 cache_counter_token += 1.0
                 probs_tensor = torch.tensor(cache_probs, device=self.device)
-                accumu_attn_tensor = torch.tensor(cache_attn_scores_token, device=self.device)
                 positions_tensor = torch.tensor(cache_positions, device=self.device).float()
                 positions_tensor = positions_tensor / float(cur_pos_id)
                 recent_ratio = 0.3
@@ -522,6 +523,15 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     cache_attn_scores_decay_avg_std = torch.cat((cache_attn_scores_decay_avg_std.view(-1, cache_attn_scores_decay_avg_std.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                     cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                     cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+                elif mode == 'tova':
+                    eviction_ids = torch.argmin(cache_attn_scores, dim=-1) + len(prefix_token_lst)
+                    _eviction_ids = eviction_ids
+                    eviction_ids = eviction_ids.cpu().numpy().tolist()
+                    past_key_values = truncate_kv_cache_silo(past_key_values, eviction_ids)
+                    _index = torch.arange(cache_attn_scores.shape[-1], device=self.device).unsqueeze(0).unsqueeze(0).repeat(num_layers, num_heads, 1)
+                    _eviction_ids -= len(prefix_token_lst)
+                    mask = (_eviction_ids.unsqueeze(-1)!=_index).view(-1, _index.shape[-1])
+                    cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                 elif mode == 'recency':
                     scores = 1.0 - positions_tensor
                     _, evict_id = torch.topk(scores, k=1, dim=-1)
@@ -643,6 +653,10 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         a = decay_factor
                         attention_map = outputs.attentions[l][0, :, 0, :] # (num_heads, l)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
+                elif 'tova' == mode:
+                    for l in range(num_layers):
+                        attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                        cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
                 # evict if current kv cache size exceeds the budget
                 cur_kv_size = past_key_values[0][0].shape[2]
                 if mode != 'full':
@@ -678,24 +692,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std_binary_avg', 'h2o_head_std_binary_avg_dynamic']:
-                        cur_std = torch.sqrt(cache_attn_scores_square_binary / cache_counter - (cache_attn_scores_binary / cache_counter)**2)
-                        cur_std[:, :, -10:] = 1e9
-                        cur_std[:, :, :sink_length] = 1e9
-                        _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window-sink_length, dim=-1) # (layers, heads, k)
-                        if 'avg' in mode:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
-                        else:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
-                        eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
+                    elif mode == 'tova':
+                        eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
                         _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
                         _src = torch.zeros(num_layers, num_heads, stride, device=self.device).view(num_layers*num_heads, -1)
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_attn_scores_binary = torch.cat((cache_attn_scores_binary.view(-1, cache_attn_scores_binary.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_attn_scores_square_binary = torch.cat((cache_attn_scores_square_binary.view(-1, cache_attn_scores_square_binary.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
                     elif mode == 'recency':
                         evict_id = sink_length-stride
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
@@ -826,6 +829,10 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         a = decay_factor
                         attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
+                elif 'tova' == mode:
+                    for l in range(num_layers):
+                        attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                        cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
                 # evict if current kv cache size exceeds the budget
                 cur_kv_size = past_key_values[0][0].shape[2]
                 if mode != 'full':
@@ -861,6 +868,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
+                    elif mode == 'tova':
+                        eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
+                        past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
+                        _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                        _src = torch.zeros(num_layers, num_heads, stride, device=self.device).view(num_layers*num_heads, -1)
+                        mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                        cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                     elif mode == 'recency':
                         evict_id = sink_length-stride
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)

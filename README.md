@@ -98,9 +98,10 @@ output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
 ## List of Supported KV Eviction Policies:
-+ random: drop kv cache of a randomly chosen position
-+ recency: similar to StreamingLLM, dropping the least recent token's kv cache
-+ h2o_head: Heavy-hitter oracle, which drops kv cache whose accumulated attention score is smallest
++ random: drop kv cache of a randomly chosen position.
++ recency: similar to StreamingLLM, dropping the least recent token's kv cache.
++ h2o_head: Heavy-hitter oracle, which drops kv cache whose accumulated attention score is smallest.
++ tova: Token Omission Via Attention, which uses attention weights of the last token only.
 + h2o_head_std_avg(for encoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 + h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 
@@ -111,6 +112,13 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
   title={Efficient streaming language models with attention sinks},
   author={Xiao, Guangxuan and Tian, Yuandong and Chen, Beidi and Han, Song and Lewis, Mike},
   journal={arXiv preprint arXiv:2309.17453},
+  year={2023}
+}
+
+@article{liu2023scissorhands,
+  title={Scissorhands: Exploiting the Persistence of Importance Hypothesis for LLM KV Cache Compression at Test Time},
+  author={Liu, Zichang and Desai, Aditya and Liao, Fangshuo and Wang, Weitao and Xie, Victor and Xu, Zhaozhuo and Kyrillidis, Anastasios and Shrivastava, Anshumali},
+  journal={arXiv preprint arXiv:2305.17118},
   year={2023}
 }
 
