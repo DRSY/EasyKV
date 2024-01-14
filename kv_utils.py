@@ -405,16 +405,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             cache_positions.append(cur_pos_id)
 
             # update accumulated attention scores
-            if 'h2o_token' == mode or 'h2o_token_avg' == mode:
-                attention_map = outputs.attentions[-1][0].mean(dim=0)[0] # (l)
-                for i in range(attention_map.shape[-1]-len(prefix_token_lst)):
-                    cache_attn_scores_token[i] += attention_map[len(prefix_token_lst)+i].cpu().item()
-            elif 'h2o_token_decay' == mode or 'h2o_token_decay_avg' == mode:
-                a = 0.96
-                attention_map = outputs.attentions[-1][0].mean(dim=0)[0] # (l)
-                for i in range(attention_map.shape[-1]-len(prefix_token_lst)):
-                    cache_attn_scores_token[i] = a*cache_attn_scores_token[i] + (1-a)*attention_map[len(prefix_token_lst)+i].cpu().item()
-            elif 'h2o_head' == mode or 'h2o_head_avg' == mode:
+            if 'h2o_head' == mode or 'h2o_head_avg' == mode:
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
@@ -435,14 +426,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
                     cache_attn_scores_binary[l, :, :attention_map.shape[-1]] += (renorm_attention_map>=threshold).float()
                     cache_attn_scores_square_binary[l, :, :attention_map.shape[-1]] += ((renorm_attention_map>=threshold).float()) ** 2
-            elif 'h2o_head_prob' == mode or 'h2o_head_prob_avg' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] += (1-token_probs[-1][-1])*attention_map
-            elif 'h2o_head_probv2' == mode or 'h2o_head_probv2_avg' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] += (token_probs[-1][-1])*attention_map
             elif 'h2o_head_decay' == mode or 'h2o_head_decay_avg' == mode:
                 a = 0.96
                 for l in range(num_layers):
@@ -455,13 +438,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
                     cache_attn_scores_decay_avg_std[l, :, :attention_map.shape[-1]] += cache_attn_scores[l, :, :attention_map.shape[-1]]
                     cache_attn_scores_square[l, :, :attention_map.shape[-1]] += (cache_attn_scores[l, :, :attention_map.shape[-1]])**2
-            elif 'h2o_head_ema_ema' == mode or 'h2o_head_ema_ema_mul':
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
-                    cur_diff = torch.abs(attention_map-cache_attn_scores[l, :, :attention_map.shape[-1]])
-                    cache_attn_diff_ema[l, :, :attention_map.shape[-1]] = a * cache_attn_diff_ema[l, :, :attention_map.shape[-1]] + (1-a) * cur_diff
             elif 'h2o_head_decay_avg_std_binary' == mode or 'h2o_head_decay_avg_std_binary_dynamic' == mode:
                 a = 0.96
                 for l in range(num_layers):
@@ -474,16 +450,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         threshold = torch.exp(-entropy(outputs.attentions[l][0, :, 0, :])).unsqueeze(-1) # (num_heads, 1)
                     cache_attn_scores_binary[l, :, :attention_map.shape[-1]] += (renorm_attention_map>=threshold).float()
                     cache_attn_scores_square_binary[l, :, :attention_map.shape[-1]] += ((renorm_attention_map>=threshold).float()) ** 2
-            elif 'h2o_head_decay_prob' == mode or 'h2o_head_decay_prob_avg' == mode:
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-token_probs[-1][-1])*(1-a) * attention_map
-            elif 'h2o_head_decay_probv2' == mode or 'h2o_head_decay_probv2_avg' == mode:
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (token_probs[-1][-1])*(1-a) * attention_map
             # evict if current kv cache size exceeds the budget
             cur_kv_size = past_key_values[0][0].shape[2]
             if (cur_kv_size-len(prefix_token_lst)) > budget and mode != 'full':

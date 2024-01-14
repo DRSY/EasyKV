@@ -80,8 +80,27 @@ input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.de
 output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
-The list of supported KV eviction policies:
+## List of supported KV Eviction Policies:
 + random: drop kv cache of a randomly chosen position
 + recency: similar to StreamingLLM, dropping the least recent token's kv cache
 + h2o_head: Heavy-hitter oracle, which drops kv cache whose accumulated attention score is smallest
-+ h2o_head_std_avg
++ h2o_head_std_avg(for encoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
++ h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
+
+
+## Acknowledgement
+```latex
+@article{xiao2023efficient,
+  title={Efficient streaming language models with attention sinks},
+  author={Xiao, Guangxuan and Tian, Yuandong and Chen, Beidi and Han, Song and Lewis, Mike},
+  journal={arXiv preprint arXiv:2309.17453},
+  year={2023}
+}
+
+@article{zhang2023h,
+  title={H $ \_2 $ O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models},
+  author={Zhang, Zhenyu and Sheng, Ying and Zhou, Tianyi and Chen, Tianlong and Zheng, Lianmin and Cai, Ruisi and Song, Zhao and Tian, Yuandong and R{\'e}, Christopher and Barrett, Clark and others},
+  journal={arXiv preprint arXiv:2306.14048},
+  year={2023}
+}
+```
