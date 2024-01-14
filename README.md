@@ -23,26 +23,29 @@ from easykv import enable_fixed_kv
 ```
 
 ## Example Usage
-There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding.
-#### Prompt Encoding/Prefilling
-For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
+There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding. Firstly, some necessary modifications to ```transformers``` are required (minor changes to RoPE to make it compatible with asynchronous position_ids and key-value length):
 ```python
 import transformers
 transformers.models.llama.modeling_llama.LlamaAttention.forward = modeling_llama.llama_forward
 transformers.models.mistral.modeling_mistral.MistralAttention.forward = modeling_mistral.mistral_forward
+``` 
+#### Prompt Encoding/Prefilling
+For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
+```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from easykv import enable_fixed_kv
 
-# define your model path and template in a dict MODEL_CONFIGS
+# Define your model path and template in a dict MODEL_CONFIGS
 model_name = 'zephyr_7b'
 path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
 
-from easykv import enable_fixed_kv
-# for prompt encoding, we set mode to 'encoding'
+# Turn on fixed KV cache mode for prefilling phase
 stride=5
 enable_fixed_kv(model, tokenizer, mode='encoding', stride=stride)
+
 # Test input
 article = "###\nArticle: It was the first time the Single Transferable Vote (STV) system had been used to select two members in the same ward in a by-election. The SNP topped the vote in the Leith Walk by-election, while Scottish Labour won the second seat from the Greens. The by-election was called after Deidre Brock of the SNP and Maggie Chapman of the Scottish Greens stood down. The SNP's John Lewis Ritchie topped the Leith Walk poll with 2,290 votes. He was elected at stage one in the STV process with a swing in first-preference votes of 7.6% from Labour. Labour's Marion Donaldson received 1,623 votes, ahead of Susan Jane Rae of the Scottish Greens on 1,381. Ms Donaldson was elected at stage 10 of the voting process after other preferences had been considered. The by-election was called after Ms Brock stood down when she was elected as the SNP MP for Edinburgh North and Leith in May. Ms Chapman, of the Scottish Greens, resigned from her post to concentrate on standing for the Scottish Parliament in next May's election. The turnout for the by-election was 25.1%. The SNP also held the Midlothian West seat on Midlothian Council with a swing of 6.3% from Labour. The party's Kelly Parry secured 1,540 votes, ahead of Labour's Ian Miller on 945 votes. The by-election was called after Owen Thompson was elected as SNP MP for the Midlothian constituency.\n\nSummarize the above article in 1 sentence.\n"
 prompt = f"Write a SHORT summary of the following text delimited by triple backticks. Return your response which covers the key points of the text.\n```{article}```"
@@ -65,23 +68,24 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 #### Auto-regressive Decoding
 For auto-regressive decoding phase, please specify ```budget``` as an integer, which represents the maximum length of KV cache, e.g, 200.
 ```python
-import transformers
-transformers.models.llama.modeling_llama.LlamaAttention.forward = modeling_llama.llama_forward
-transformers.models.mistral.modeling_mistral.MistralAttention.forward = modeling_mistral.mistral_forward
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from easykv import enable_fixed_kv
 
-# define your model path and template in a dict MODEL_CONFIGS
+# Define your model path and template in a dict MODEL_CONFIGS
 model_name = 'zephyr_7b'
 path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
 
-from easykv import enable_fixed_kv
+# Turn on fixed KV cache mode for decoding phase
 enable_fixed_kv(model, tokenizer, mode='decoding', stride=1)
+
+# Test input
 prompt = f"What are the names of some famous actors that started their careers on Broadway?"
 input_prompt = template.format(inst=prompt)
 kv_policy = 'h2o_head_decay_avg_std'
+# Define sampling parameters
 gen_kwargs = dict(
     temperature=1e-9,
     top_p=1.0,
@@ -93,7 +97,7 @@ input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.de
 output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
-## List of supported KV Eviction Policies:
+## List of Supported KV Eviction Policies:
 + random: drop kv cache of a randomly chosen position
 + recency: similar to StreamingLLM, dropping the least recent token's kv cache
 + h2o_head: Heavy-hitter oracle, which drops kv cache whose accumulated attention score is smallest
