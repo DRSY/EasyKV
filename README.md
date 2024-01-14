@@ -2,7 +2,7 @@
 EasyKV is a Pytorch implementation of various eviction policies for key-value cache constrained generative language model inference.
 
 ## Update
-+ Uploaded the standalone Pytorch implementation in [kv_utils.py](./kv_utils.py). Pypi package coming soon.
++ Uploaded the standalone Pytorch implementation. Pypi package and paper describing the details of our integrated eviction policy design are coming soon.
 
 ## Features
 + Offer control over the memory budget allocated for the KV cache during LLM inference, with easy-to-use interface.
@@ -11,6 +11,16 @@ EasyKV is a Pytorch implementation of various eviction policies for key-value ca
 + Support LLaMa, LLaMa2, and Mistral.
 + Support various stride for prompt encoding(larger stride leads to faster encoding).
 
+## Installation
+First of all, clone this repo into your working directory.
+```bash
+git clone https://github.com/DRSY/EasyKV.git
+cd EasyKV
+```
+Then import ```enable_fixed_kv``` in your Python script:
+```python
+from kv_utils import enable_fixed_kv
+```
 
 ## Example Usage
 For prefilling stage:
