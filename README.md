@@ -19,10 +19,11 @@ cd EasyKV
 ```
 Then import ```enable_fixed_kv``` in your Python script:
 ```python
-from kv_utils import enable_fixed_kv
+from easykv import enable_fixed_kv
 ```
 
 ## Example Usage
+There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding.
 For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
 ```python
 import transformers
@@ -37,7 +38,7 @@ template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
 
-from kv_utils import enable_fixed_kv
+from easykv import enable_fixed_kv
 # for prompt encoding, we set mode to 'encoding'
 stride=5
 enable_fixed_kv(model, tokenizer, mode='encoding', stride=stride)
@@ -74,7 +75,7 @@ template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
 
-from kv_utils import enable_fixed_kv
+from easykv import enable_fixed_kv
 enable_fixed_kv(model, tokenizer, mode='decoding', stride=1)
 prompt = f"What are the names of some famous actors that started their careers on Broadway?"
 input_prompt = template.format(inst=prompt)
