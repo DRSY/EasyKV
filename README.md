@@ -23,7 +23,7 @@ from kv_utils import enable_fixed_kv
 ```
 
 ## Example Usage
-For prefilling stage:
+For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
 ```python
 import transformers
 transformers.models.llama.modeling_llama.LlamaAttention.forward = modeling_llama.llama_forward
@@ -60,7 +60,7 @@ input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.de
 output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
-For auto-regressive decoding phase:
+For auto-regressive decoding phase, please specify ```budget``` as an integer, which represents the maximum length of KV cache, e.g, 200.
 ```python
 import transformers
 transformers.models.llama.modeling_llama.LlamaAttention.forward = modeling_llama.llama_forward
