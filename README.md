@@ -171,7 +171,6 @@ Current GPU memory usage: 15.626 GB
 Peak GPU memory usage: 18.427 GB
 Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 23789.]
 ```
-With ```budget``` set to 0.5, we observe 4GB peak GPU VRAM reduction.
 
 The results of Vicuna-7B-16K on ```10K``` passkey retrieval task is shown below:
 ```bash
