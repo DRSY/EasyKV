@@ -1,5 +1,5 @@
-# EasyKV
-EasyKV is a Pytorch implementation of various eviction policies for key-value cache constrained generative language model inference.
+# <center>EasyKV</center>
+EasyKV is a Pytorch implementation of various eviction policies for ***key-value cache constrained*** generative language model inference.
 
 ## Update
 + Uploaded the standalone Pytorch implementation. Pypi package and paper describing the details of our integrated eviction policy design are coming soon.
@@ -105,6 +105,9 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 + tova: Token Omission Via Attention, which uses attention weights of the last token only.
 + h2o_head_std_avg(for encoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 + h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
+
+## TODOs
+- [ ] Integrate with context window extension methods like DynamicNTK, Self-Extend.
 
 
 ## Acknowledgement
