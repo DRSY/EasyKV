@@ -4,6 +4,10 @@ import math
 from tqdm.auto import tqdm, trange
 import statistics
 import time
+from utils import modify_method_of_instance
+from llama_patch import llama_forward
+from mistral_patch import mistral_forward
+from functools import partial
 
 def cache_size(kv_cache):
     """
@@ -149,13 +153,16 @@ def h2o_head_prob_score(attention_map, device, probs, mode:str='v1'):
     return cache_attn_scores, cache_attn_scores_square
 
 def h2o_head_score(attention_map, device, stride, num_heads):
+    attention_map = list(attention_map)
     num_layers = len(attention_map)
     budget = attention_map[0].shape[-1]
     cache_attn_scores = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
     cache_attn_scores_square = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
     for l in range(num_layers):
+        attention_map[l] = attention_map[l].to('cuda')
         cache_attn_scores[l, :, :-stride] = torch.sum(attention_map[l][0], dim=1)
         cache_attn_scores_square[l, :, :-stride] = torch.sum(attention_map[l][0]**2, dim=1)
+        attention_map[l] = None
     return cache_attn_scores, cache_attn_scores_square
 
 
@@ -380,7 +387,12 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             cur_pos_id = past_key_values[0][0].shape[2]
         else:
-            s = time.time()
+            # In case budget is also large, the attention_map will occupy a lot of memory
+            # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
+            if 'llama' in self.config.architectures[0].lower():
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+            else:
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
             budget = int(length * budget) + stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
@@ -403,12 +415,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 sl = outputs_prefilling.attentions[l].shape[2]
                 tl = outputs_prefilling.attentions[l].shape[3]
                 outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
-            if 'decay' in mode and not 'prob' in mode:
-                cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device)
+            cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, num_heads)
+            # Back to GPU
+            if 'llama' in self.config.architectures[0].lower():
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
             else:
-                cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, num_heads)
-            del outputs_prefilling
-            torch.cuda.empty_cache()
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+
             cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
@@ -572,8 +585,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device, stride)
             else:
                 cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride)
-            del outputs_prefilling
-            torch.cuda.empty_cache()
             cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)

@@ -2,11 +2,12 @@ import warnings
 warnings.filterwarnings("ignore")
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer, AutoConfig)
-from easykv import enable_fixed_kv
+from easykv import enable_fixed_kv, gpu_stats
 from utils import modify_method_of_instance, set_dynamicntk_rope_length
 from llama_patch import llama_forward
 from mistral_patch import mistral_forward
 import json
+from functools import partial
 
 # Define the model path and the corresponding prompt template
 MODEL_CONFIGS = {
@@ -40,9 +41,6 @@ tokenizer = AutoTokenizer.from_pretrained(path)
 # Set the max sequence length before inference to avoid inconsistency of RoPE's base parameter
 set_dynamicntk_rope_length(model, 5200)
 
-# Preparation for fixed KV inference
-modify_method_of_instance(model, "LlamaAttention", "forward", llama_forward)
-
 # Define KV cache eviction policy
 kv_policy = "h2o_head_std_avg"
 
@@ -59,7 +57,7 @@ for line in open("./passkey_examples_5k.jsonl", "r"):
 
     # EasyKV generate
     enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
-    budgets = [1.0, 0.5]
+    budgets = [0.5]
     for budget in budgets:
         # Define sampling parameters
         gen_kwargs = dict(
@@ -70,6 +68,7 @@ for line in open("./passkey_examples_5k.jsonl", "r"):
             kv_policy=kv_policy
         )
         output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
+        # gpu_stats()
         answer= f"Llama2-EasyKV({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
         answer = answer.replace("\n", "\\n")
         print(answer)

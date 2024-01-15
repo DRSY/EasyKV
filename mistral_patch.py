@@ -69,6 +69,7 @@ def mistral_forward(
     past_key_value: Optional[Cache] = None,
     output_attentions: bool = False,
     use_cache: bool = False,
+    attn_device = 'cuda',
     **kwargs,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     if "padding_mask" in kwargs:
@@ -154,5 +155,6 @@ def mistral_forward(
 
     if not output_attentions:
         attn_weights = None
+    else: attn_weights = attn_weights.to(attn_device)
 
     return attn_output, attn_weights, past_key_value
