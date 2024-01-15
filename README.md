@@ -15,7 +15,8 @@ EasyKV is a Pytorch implementation of various eviction policies for ***key-value
 </p>
 
 ## Update
-+ Uploaded the standalone Pytorch implementation. Pypi package and paper describing the details of our integrated eviction policy design are coming soon.
++ [2024.1.15] Add examples and support for DynamicNTK for context extension. See [Passkey Retrieval](#passkey-retrieval-example).
++ [2024.1.14] Uploaded the standalone Pytorch implementation. Pypi package and paper describing the details of our integrated eviction policy design are coming soon.
 
 ## Features
 + Offer control over the memory budget allocated for the KV cache during LLM inference, with easy-to-use interface.
