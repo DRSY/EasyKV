@@ -71,7 +71,8 @@ gen_kwargs = dict(
     top_p=1.0,
     max_new_tokens=256,
     budget=0.5,
-    kv_policy=kv_policy
+    kv_policy=kv_policy,
+    keep_attention=False # set to True if your DRAM is not tight and you can get better performance
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
@@ -100,7 +101,7 @@ gen_kwargs = dict(
     top_p=1.0,
     max_new_tokens=2048,
     budget=200,
-    kv_policy=kv_policy
+    kv_policy=kv_policy,
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
