@@ -23,17 +23,19 @@ from easykv import enable_fixed_kv
 ```
 
 ## Example Usage
-There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding. Firstly, some necessary modifications to ```transformers``` are required (minor changes to RoPE to make it compatible with asynchronous position_ids and key-value length):
+There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding. Firstly, some necessary patches to ```transformers``` are required (minor changes to RoPE to make it compatible with asynchronous position_ids and key-value length).
 ```python
-import transformers
-transformers.models.llama.modeling_llama.LlamaAttention.forward = modeling_llama.llama_forward
-transformers.models.mistral.modeling_mistral.MistralAttention.forward = modeling_mistral.mistral_forward
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from easykv import enable_fixed_kv
+from utils import modify_method_of_instance
+from llama_patch import llama_forward
+from mistral_patch import mistral_forward
 ``` 
 #### Prompt Encoding/Prefilling
 For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from easykv import enable_fixed_kv
 
 # Define your model path and template in a dict MODEL_CONFIGS
 model_name = 'zephyr_7b'
@@ -41,9 +43,10 @@ path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
+modify_method_of_instance(model, "MistralAttention", "forward", mistral_forward)
 
 # Turn on fixed KV cache mode for prefilling phase
-stride=5
+stride=8
 enable_fixed_kv(model, tokenizer, mode='encoding', stride=stride)
 
 # Test input
@@ -68,15 +71,13 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 #### Auto-regressive Decoding
 For auto-regressive decoding phase, please specify ```budget``` as an integer, which represents the maximum length of KV cache, e.g, 200.
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from easykv import enable_fixed_kv
-
 # Define your model path and template in a dict MODEL_CONFIGS
-model_name = 'zephyr_7b'
+model_name = 'llama2_7b_chat'
 path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
+modify_method_of_instance(model, "LlamaAttention", "forward", llama_forward)
 
 # Turn on fixed KV cache mode for decoding phase
 enable_fixed_kv(model, tokenizer, mode='decoding', stride=1)
