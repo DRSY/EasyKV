@@ -195,7 +195,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
 
         cache_tokens = []
         cache_probs = []
-        cache_typical_probs = []
         cache_cur_probs = []
         cache_positions = []
         cache_attn_scores = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -240,7 +239,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             # update 
             cache_probs.append(next_token_prob[0,0].cpu().item())
             cache_tokens.append(output_ids[-1])
-            cache_typical_probs.append(torch.exp(-entropy(raw_prob_prev_step))[0].cpu().item())
             cache_positions.append(cur_pos_id)
 
             # update accumulated attention scores
@@ -312,7 +310,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     evicted_positions.append(cache_positions[evict_id]-len(prefix_token_lst))
                     cache_probs.pop(evict_id)
                     cache_tokens.pop(evict_id)
-                    cache_typical_probs.pop(evict_id)
                     cache_cur_probs.pop(evict_id)
                     cache_positions.pop(evict_id)
                 elif mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob', 'h2o_head_prob_avg', 'h2o_head_probv2', 'h2o_head_probv2_avg', 'h2o_head_decay_prob', 'h2o_head_decay_probv2', 'h2o_head_decay_prob_avg', 'h2o_head_decay_probv2_avg']:
@@ -381,7 +378,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     evicted_positions.append(cache_positions[evict_id]-len(prefix_token_lst))
                     cache_probs.pop(evict_id)
                     cache_tokens.pop(evict_id)
-                    cache_typical_probs.pop(evict_id)
                     cache_cur_probs.pop(evict_id)
                     cache_positions.pop(evict_id)
                 elif mode == 'random':
@@ -392,7 +388,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     evicted_positions.append(cache_positions[evict_id]-len(prefix_token_lst))
                     cache_probs.pop(evict_id)
                     cache_tokens.pop(evict_id)
-                    cache_typical_probs.pop(evict_id)
                     cache_cur_probs.pop(evict_id)
                     cache_positions.pop(evict_id)
             cur_pos_id += 1
@@ -428,7 +423,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             cache_probs = [1.0] + prefix_prob
-            cache_typical_probs = []
             cache_cur_probs = []
             cache_positions = list(range(prefix.shape[-1]))
             cache_attn_scores_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -475,7 +469,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
                 # update 
-                cache_typical_probs.append(torch.exp(-entropy(raw_prob_prev_step))[0].cpu().item())
                 for pos_ in range(stride): cache_positions.append(cur_pos_id+pos_)
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
@@ -606,7 +599,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             cache_probs = [1.0] + prefix_prob
-            cache_typical_probs = []
             cache_cur_probs = []
             cache_positions = list(range(prefix.shape[-1]))
             cache_attn_scores_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -650,7 +642,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
                 # update 
-                cache_typical_probs.append(torch.exp(-entropy(raw_prob_prev_step))[0].cpu().item())
                 for pos_ in range(stride): cache_positions.append(cur_pos_id+pos_)
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
