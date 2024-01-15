@@ -3,7 +3,7 @@ from typing import Tuple
 import math
 from tqdm.auto import tqdm, trange
 import statistics
-import math
+import time
 
 def cache_size(kv_cache):
     """
@@ -406,6 +406,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             cur_pos_id = past_key_values[0][0].shape[2]
         else:
+            s = time.time()
             budget = int(length * budget) + stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
@@ -548,6 +549,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 cur_pos_id += stride
         cur_pos_id = input_ids.shape[-1]
         _tmp = past_key_values[0][0].shape[2]
+        print(f"Encoding mode with stride {stride} cost: {time.time()-s:.3f}s")
         print(f"KV cache budget ratio: {_tmp / input_ids.shape[-1]*100:.2f}%({_tmp}/{input_ids.shape[-1]})")
         n = 0
         output_ids = []
@@ -603,6 +605,12 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             cache_positions = list(range(prefix.shape[-1]))
             cache_attn_scores_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             cache_attn_scores_square_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
+            outputs_prefilling.attentions = list(outputs_prefilling.attentions)
+            for l in range(num_layers):
+                bs = outputs_prefilling.attentions[l].shape[0]
+                sl = outputs_prefilling.attentions[l].shape[2]
+                tl = outputs_prefilling.attentions[l].shape[3]
+                outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
             if 'decay' in mode and not 'prob' in mode:
                 cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device, stride)
             else:
