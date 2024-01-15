@@ -11,7 +11,7 @@ EasyKV is a Pytorch implementation of various eviction policies for ***key-value
   <a href="#example-usage">Example</a> •
   <a href="#passkey-retrieval-example">Passkey Retrieval</a> •
   <a href="#todos">Todos</a> •
-  <a href="#acknowledgement">Acknowledgement</a> •
+  <a href="#acknowledgement">Acknowledgement</a>
 </p>
 
 ## Update
@@ -115,41 +115,124 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 + h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 
 ## Passkey Retrieval Example
-We provide examplar code for passkey retrieval in [test_passkey.py](./test_passkey.py). Specifically, we adopt DynamicNTK scaling to extend the context length of LLaMa2-7B-Chat from 4k to a number that is larger than the maximum tokens in the passages.
+We provide examplar code for passkey retrieval in [test_passkey.py](./test_passkey.py) and [test_passkey_NTK.py](./test_passkey_NTK.py) using Vicuna-7B-16K and DynamicNTK-scaled LLaMa2-7B-Chat, respectively.
 
-The results of full KV cache and 50%-constrained KV cache using EasyKV is shown below:
+The results of DynamicNTK-scaled LLaMa2-7B-Chat on ```5K``` passkey retrieval task is shown below:
 ```bash
 #Tokens of Prompt: 5144 Passkey target: 89427
 KV cache budget ratio: 100.00%(5144/5144)
-Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 89427.]
+Current GPU memory usage: 18.359 GB
+Peak GPU memory usage: 21.751 GB
+Llama2-EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 89427.]
+
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 89427.]
------------------------------------
+Current GPU memory usage: 15.625 GB
+Peak GPU memory usage: 18.423 GB
+Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 89427.]
+------------------------------------------------------------------------------------
 #Tokens of Prompt: 5144 Passkey target: 51906
 KV cache budget ratio: 100.00%(5144/5144)
-Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 51906.]
+Current GPU memory usage: 18.359 GB
+Peak GPU memory usage: 21.751 GB
+Llama2-EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 51906.]
+
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 51906.]
------------------------------------
+Current GPU memory usage: 15.625 GB
+Peak GPU memory usage: 18.427 GB
+Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 51906.]
+------------------------------------------------------------------------------------
 #Tokens of Prompt: 5144 Passkey target: 38117
 KV cache budget ratio: 100.00%(5144/5144)
-Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 38117.]
+Current GPU memory usage: 18.359 GB
+Peak GPU memory usage: 21.751 GB
+Llama2-EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 38117.]
+
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 38117.]
------------------------------------
+Current GPU memory usage: 15.625 GB
+Peak GPU memory usage: 18.427 GB
+Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 38117.]
+------------------------------------------------------------------------------------
 #Tokens of Prompt: 5144 Passkey target: 60151
 KV cache budget ratio: 100.00%(5144/5144)
-Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 60151.]
+Current GPU memory usage: 18.359 GB
+Peak GPU memory usage: 21.751 GB
+Llama2-EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 60151.]
+
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 60151.]
------------------------------------
+Current GPU memory usage: 15.625 GB
+Peak GPU memory usage: 18.427 GB
+Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 60151.]
+------------------------------------------------------------------------------------
 #Tokens of Prompt: 5144 Passkey target: 23789
 KV cache budget ratio: 100.00%(5144/5144)
-Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 23789.]
+Current GPU memory usage: 18.359 GB
+Peak GPU memory usage: 21.752 GB
+Llama2-EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 23789.]
+
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 23789.]
+Current GPU memory usage: 15.626 GB
+Peak GPU memory usage: 18.427 GB
+Llama2-EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 23789.]
 ```
 With ```budget``` set to 0.5, we observe 4GB peak GPU VRAM reduction.
+
+The results of Vicuna-7B-16K on ```10K``` passkey retrieval task is shown below:
+```bash
+#Tokens of Prompt: 9994 Passkey target: 51013
+KV cache budget ratio: 100.00%(9994/9994)
+Current GPU memory usage: 23.666 GB
+Peak GPU memory usage: 41.896 GB
+EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 51013.]
+
+KV cache budget ratio: 50.05%(5002/9994)
+Current GPU memory usage: 18.4 GB
+Peak GPU memory usage: 25.36 GB
+EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 51013.]
+------------------------------------------------------------------------------------
+#Tokens of Prompt: 9994 Passkey target: 36920
+KV cache budget ratio: 100.00%(9994/9994)
+Current GPU memory usage: 23.666 GB
+Peak GPU memory usage: 41.896 GB
+EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 36920.]
+
+KV cache budget ratio: 50.05%(5002/9994)
+Current GPU memory usage: 18.378 GB
+Peak GPU memory usage: 25.36 GB
+EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 36920.]
+------------------------------------------------------------------------------------
+#Tokens of Prompt: 9994 Passkey target: 83493
+KV cache budget ratio: 100.00%(9994/9994)
+Current GPU memory usage: 23.666 GB
+Peak GPU memory usage: 41.896 GB
+EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 83493.]
+
+KV cache budget ratio: 50.05%(5002/9994)
+Current GPU memory usage: 18.378 GB
+Peak GPU memory usage: 25.36 GB
+EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 83493.]
+------------------------------------------------------------------------------------
+#Tokens of Prompt: 9994 Passkey target: 78585
+KV cache budget ratio: 100.00%(9994/9994)
+Current GPU memory usage: 23.666 GB
+Peak GPU memory usage: 41.896 GB
+EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 78585.]
+
+KV cache budget ratio: 50.05%(5002/9994)
+Current GPU memory usage: 18.378 GB
+Peak GPU memory usage: 25.36 GB
+EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 78585.]
+------------------------------------------------------------------------------------
+#Tokens of Prompt: 9994 Passkey target: 58328
+KV cache budget ratio: 100.00%(9994/9994)
+Current GPU memory usage: 23.666 GB
+Peak GPU memory usage: 41.896 GB
+EasyKV-h2o_head_std_avg(100.00%):     [What is the pass key? The pass key is 58328.]
+
+KV cache budget ratio: 50.05%(5002/9994)
+Current GPU memory usage: 18.378 GB
+Peak GPU memory usage: 25.36 GB
+EasyKV-h2o_head_std_avg(50.00%):     [What is the pass key? The pass key is 58328.]
+```
 
 ## Summarization Example
 We provide examplar code for summarization in [test_summarization.py](./test_summarization.py).

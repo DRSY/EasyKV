@@ -22,7 +22,7 @@ def gpu_stats():
     memory_stats = torch.cuda.memory_stats()
     print("Current GPU memory usage:", round(memory_stats["allocated_bytes.all.current"]/(1024**3), 3), "GB")
     print("Peak GPU memory usage:", round(memory_stats["allocated_bytes.all.peak"]/(1024**3), 3), "GB")
-    print("Reserved GPU memory:", round(memory_stats["reserved_bytes.all.allocated"]/(1024**3), 3), "GB")
+    # print("Reserved GPU memory:", round(memory_stats["reserved_bytes.all.allocated"]/(1024**3), 3), "GB")
 
 
 # ANSI code for different colors
@@ -150,17 +150,19 @@ def h2o_head_prob_score(attention_map, device, probs, mode:str='v1'):
         cache_attn_scores_square[l, :, :-1] = torch.sum((attention_map[l][0] * probs)**2, dim=1)
     return cache_attn_scores, cache_attn_scores_square
 
-def h2o_head_score(attention_map, device, stride, num_heads):
-    attention_map = list(attention_map)
-    num_layers = len(attention_map)
-    budget = attention_map[0].shape[-1]
+def h2o_head_score(attention_map, device, stride, budget, num_layers, num_heads, empty=False):
+    if attention_map is not None:
+        attention_map = list(attention_map)
+        num_layers = len(attention_map)
+        budget = attention_map[0].shape[-1]
     cache_attn_scores = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
     cache_attn_scores_square = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
-    for l in range(num_layers):
-        attention_map[l] = attention_map[l].to('cuda')
-        cache_attn_scores[l, :, :-stride] = torch.sum(attention_map[l][0], dim=1)
-        cache_attn_scores_square[l, :, :-stride] = torch.sum(attention_map[l][0]**2, dim=1)
-        attention_map[l] = None
+    if not empty:
+        for l in range(num_layers):
+            attention_map[l] = attention_map[l].to('cuda')
+            cache_attn_scores[l, :, :-stride] = torch.sum(attention_map[l][0], dim=1)
+            cache_attn_scores_square[l, :, :-stride] = torch.sum(attention_map[l][0]**2, dim=1)
+            attention_map[l] = None
     return cache_attn_scores, cache_attn_scores_square
 
 
@@ -179,6 +181,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
     mode = generation_config['kv_policy']
     temp_length = generation_config.get('temp_length', 4)
     recent_ratio = generation_config.get('recent_ratio', 0.1)
+    keep_attention = generation_config.get('keep_attention', False)
     num_layers = self.config.num_hidden_layers
     if not hasattr(self.config, "num_key_value_heads"): num_heads = self.config.num_attention_heads
     else: num_heads = self.config.num_key_value_heads
@@ -398,7 +401,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             recent_window = int(budget*recent_ratio)
             decay_factor = math.exp(math.log(0.001) / budget)
             sink_length = temp_length
-            outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=True)
+            outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
             loss = loss_fct(logits[:, :-1].view(-1, logits.shape[-1]), prefix[:, 1:].clone().view(-1))
@@ -407,21 +410,25 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
-            outputs_prefilling.attentions = list(outputs_prefilling.attentions)
-            for l in range(num_layers):
-                bs = outputs_prefilling.attentions[l].shape[0]
-                sl = outputs_prefilling.attentions[l].shape[2]
-                tl = outputs_prefilling.attentions[l].shape[3]
-                outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
-            cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, num_heads)
+            if keep_attention:
+                outputs_prefilling.attentions = list(outputs_prefilling.attentions)
+                for l in range(num_layers):
+                    bs = outputs_prefilling.attentions[l].shape[0]
+                    sl = outputs_prefilling.attentions[l].shape[2]
+                    tl = outputs_prefilling.attentions[l].shape[3]
+                    outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+            cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
             # Back to GPU
             if 'llama' in self.config.architectures[0].lower():
                 modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
             else:
                 modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
 
-            cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-            cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
+            if keep_attention:
+                cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
+                cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
+            else:
+                cache_counter = torch.tensor([[[float(stride)]*idx+torch.arange(stride, 0, -1).numpy().tolist() for _ in range(num_heads)] for _ in range(num_layers)], device=self.device) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
             cache_counter_token = torch.cumsum(cache_counter_token, dim=-1).flip(dims=(0, )) - float(stride)
             n = 0

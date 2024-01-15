@@ -44,7 +44,8 @@ for budget in [1.0, 0.5]:
         top_p=1.0,
         max_new_tokens=256,
         budget=budget,
-        kv_policy=kv_policy
+        kv_policy=kv_policy,
+        keep_attention=True
     )
     input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
     output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)

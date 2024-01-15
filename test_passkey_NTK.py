@@ -22,48 +22,52 @@ MODEL_CONFIGS = {
 }
 
 # Define model config
-model_name = 'vicuna_7b_16k'
+model_name = 'llama2_7b_chat'
 path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 
+# Enable DynamicNTK for extending LLaMa2 to longer sequences
+config = AutoConfig.from_pretrained(path)
+config.rope_scaling = dict(type="dynamic", factor=2)
+config.max_position_embeddings = 4096
 
 # Load model
-config = AutoConfig.from_pretrained(path)
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto', config=config).eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
+
+# Set the max sequence length before inference to avoid inconsistency of RoPE's base parameter
+set_dynamicntk_rope_length(model, 5200)
 
 # Define KV cache eviction policy
 kv_policy = "h2o_head_std_avg"
 
-enable_fixed_kv(model, tokenizer, mode='encoding', stride=96)
+enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
 
 
-with torch.no_grad():
-    # Test the passkey retrieval task
-    for line in open("./passkey_examples_10k.jsonl", "r"):
-        example = json.loads(line)
-        prompt_postfix = "What is the pass key? The pass key is "
-        prompt = example["input"] + prompt_postfix
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
-        print("-----------------------------------")
-        print(f"#Tokens of Prompt:", input_ids.shape[1], end=" ")
-        print("Passkey target:", example["target"])
+# Test the passkey retrieval task
+for line in open("./passkey_examples_5k.jsonl", "r"):
+    example = json.loads(line)
+    prompt_postfix = "What is the pass key? The pass key is "
+    prompt = example["input"] + prompt_postfix
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
+    print("-----------------------------------")
+    print(f"#Tokens of Prompt:", input_ids.shape[1], end=" ")
+    print("Passkey target:", example["target"])
 
-        # EasyKV generate
-        budgets = [0.5]
-        for budget in budgets:
-            # Define sampling parameters
-            for kv_policy in ['h2o_head_std_avg']:
-                gen_kwargs = dict(
-                    temperature=1e-9,
-                    top_p=1.0,
-                    max_new_tokens=6,
-                    budget=budget,
-                    kv_policy=kv_policy,
-                    keep_attention=False
-                )
-                output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
-                answer= f"EasyKV-{kv_policy}({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
-                answer = answer.replace("\n", "\\n")
-                print(answer)
-                torch.cuda.empty_cache()
+    # EasyKV generate
+    budgets = [0.5]
+    for budget in budgets:
+        # Define sampling parameters
+        for kv_policy in ['h2o_head_std_avg']:
+            gen_kwargs = dict(
+                temperature=1e-9,
+                top_p=1.0,
+                max_new_tokens=6,
+                budget=budget,
+                kv_policy=kv_policy,
+                keep_attention=True
+            )
+            output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
+            answer= f"Llama2-EasyKV-{kv_policy}({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
+            answer = answer.replace("\n", "\\n")
+            print(answer)
