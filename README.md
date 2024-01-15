@@ -154,6 +154,7 @@ Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 23789.]
 KV cache budget ratio: 50.08%(2576/5144)
 Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 23789.]
 ```
+With ```budget``` set to 0.5, we observe 4GB peak GPU VRAM reduction.
 
 ## TODOs
 - [ ] Integrate with context window extension methods like DynamicNTK.
