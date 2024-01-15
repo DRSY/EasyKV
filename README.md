@@ -40,11 +40,7 @@ There are two different phases in LLM generative inference, i.e., prompt encodin
 ```python
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
 from easykv import enable_fixed_kv
-from utils import modify_method_of_instance
-from llama_patch import llama_forward
-from mistral_patch import mistral_forward
 ``` 
 #### Prompt Encoding/Prefilling
 For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
@@ -56,7 +52,6 @@ path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
-modify_method_of_instance(model, "MistralAttention", "forward", mistral_forward)
 
 # Turn on fixed KV cache mode for prefilling phase
 stride=8
@@ -90,7 +85,6 @@ path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
-modify_method_of_instance(model, "LlamaAttention", "forward", llama_forward)
 
 # Turn on fixed KV cache mode for decoding phase
 enable_fixed_kv(model, tokenizer, mode='decoding', stride=1)
