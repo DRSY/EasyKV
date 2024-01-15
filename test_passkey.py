@@ -59,7 +59,7 @@ for line in open("./passkey_examples_5k.jsonl", "r"):
 
     # EasyKV generate
     enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
-    budgets = [0.5,0.4,0.3]
+    budgets = [1.0, 0.5]
     for budget in budgets:
         # Define sampling parameters
         gen_kwargs = dict(
@@ -73,9 +73,3 @@ for line in open("./passkey_examples_5k.jsonl", "r"):
         answer= f"Llama2-EasyKV({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
         answer = answer.replace("\n", "\\n")
         print(answer)
-
-    # HF full KV cache generate
-    tokens = model.generate(input_ids=input_ids, max_new_tokens=6)
-    answer= "Llama2-Full:     [" + prompt_postfix + tokenizer.decode(tokens[0].tolist()[input_ids.shape[1]:], skip_special_tokens=True)  + "]"
-    answer = answer.replace("\n", "\\n")
-    print(answer)

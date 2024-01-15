@@ -200,8 +200,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         cache_attn_scores = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_attn_scores_decay_avg_std = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_attn_scores_square = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-        cache_attn_scores_binary = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-        cache_attn_scores_square_binary = torch.tensor([[[0.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_counter = torch.tensor([[[1.0]*(budget+1) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
         cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - 1.0
         cache_counter_token = torch.tensor([1.0]*(budget+1), device=self.device)
@@ -251,18 +249,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
                     cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map ** 2
-            elif 'h2o_head_std_avg_binary' == mode or 'h2o_head_std_avg_binary_dynamic' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    # renorm_attention_map = attention_map / attention_map.sum(dim=-1, keepdims=True)
-                    renorm_attention_map = attention_map
-                    if not 'dynamic' in mode:
-                        threshold = 1.0 / (renorm_attention_map.shape[-1]+len(prefix_token_lst))
-                    else:
-                        threshold = torch.exp(-entropy(outputs.attentions[l][0, :, 0, :])).unsqueeze(-1) # (num_heads, 1)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                    cache_attn_scores_binary[l, :, :attention_map.shape[-1]] += (renorm_attention_map>=threshold).float()
-                    cache_attn_scores_square_binary[l, :, :attention_map.shape[-1]] += ((renorm_attention_map>=threshold).float()) ** 2
             elif 'h2o_head_decay' == mode or 'h2o_head_decay_avg' == mode:
                 a = 0.96
                 for l in range(num_layers):
@@ -275,18 +261,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
                     cache_attn_scores_decay_avg_std[l, :, :attention_map.shape[-1]] += cache_attn_scores[l, :, :attention_map.shape[-1]]
                     cache_attn_scores_square[l, :, :attention_map.shape[-1]] += (cache_attn_scores[l, :, :attention_map.shape[-1]])**2
-            elif 'h2o_head_decay_avg_std_binary' == mode or 'h2o_head_decay_avg_std_binary_dynamic' == mode:
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
-                    renorm_attention_map = attention_map
-                    if not 'dynamic' in mode:
-                        threshold = 1.0 / (renorm_attention_map.shape[-1]+len(prefix_token_lst))
-                    else:
-                        threshold = torch.exp(-entropy(outputs.attentions[l][0, :, 0, :])).unsqueeze(-1) # (num_heads, 1)
-                    cache_attn_scores_binary[l, :, :attention_map.shape[-1]] += (renorm_attention_map>=threshold).float()
-                    cache_attn_scores_square_binary[l, :, :attention_map.shape[-1]] += ((renorm_attention_map>=threshold).float()) ** 2
             elif 'tova' == mode:
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
@@ -423,11 +397,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
-            cache_probs = [1.0] + prefix_prob
-            cache_cur_probs = []
-            cache_positions = list(range(prefix.shape[-1]))
-            cache_attn_scores_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-            cache_attn_scores_square_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             outputs_prefilling.attentions = list(outputs_prefilling.attentions)
             for l in range(num_layers):
                 bs = outputs_prefilling.attentions[l].shape[0]
@@ -438,6 +407,8 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device)
             else:
                 cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, num_heads)
+            del outputs_prefilling
+            torch.cuda.empty_cache()
             cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
@@ -458,7 +429,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                                 output_attentions=True)
                 past_key_values = outputs.past_key_values
                 logits_prev_step = outputs.logits[:, -1, :]
-                cache_cur_probs.append(torch.exp(-entropy(raw_prob_prev_step))[0].cpu().item())
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
@@ -469,8 +439,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     tl = outputs.attentions[l].shape[3]
                     outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
-                # update 
-                for pos_ in range(stride): cache_positions.append(cur_pos_id+pos_)
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
                     for l in range(num_layers):
@@ -496,8 +464,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 if mode != 'full':
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
-                    positions_tensor = torch.tensor(cache_positions, device=self.device).float()
-                    positions_tensor = positions_tensor / float(cur_pos_id)
                     if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
                         if not 'avg' in mode:
                             eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
@@ -536,29 +502,22 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     elif mode == 'recency':
                         evict_id = sink_length-stride
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
-                        evicted_positions.append(cache_positions[evict_id])
                     elif mode == 'random':
-                        scores = torch.rand(*positions_tensor.shape).to(self.device)
+                        scores = torch.rand(cache_attn_scores.shape[-1]).to(self.device)
                         scores[-stride:] = -1e9
                         _, evict_id = torch.topk(scores, k=1, dim=-1)
                         evict_id = evict_id[0].cpu().item()
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
-                        evicted_positions.append(cache_positions[evict_id])
-                        for _ in range(stride):
-                            cache_positions.pop(evict_id)
                 cur_pos_id += stride
         cur_pos_id = input_ids.shape[-1]
         _tmp = past_key_values[0][0].shape[2]
-        print(f"Encoding mode with stride {stride} cost: {time.time()-s:.3f}s")
         print(f"KV cache budget ratio: {_tmp / input_ids.shape[-1]*100:.2f}%({_tmp}/{input_ids.shape[-1]})")
         n = 0
         output_ids = []
-        token_probs = []
         while n < max_new_tokens:
             next_token = torch.multinomial(prob_prev_step, num_samples=1)
             output_ids.append(next_token[0, 0].cpu().item())
             next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
-            token_probs.append((tokenizer.convert_ids_to_tokens([output_ids[-1]])[0], next_token_prob[0, 0].cpu().item()))
             n += 1
             if output_ids[-1] == tokenizer.eos_token_id: break
             outputs = self(input_ids=next_token, 
@@ -603,8 +562,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             cache_probs = [1.0] + prefix_prob
             cache_cur_probs = []
             cache_positions = list(range(prefix.shape[-1]))
-            cache_attn_scores_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-            cache_attn_scores_square_binary = torch.tensor([[[0.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             outputs_prefilling.attentions = list(outputs_prefilling.attentions)
             for l in range(num_layers):
                 bs = outputs_prefilling.attentions[l].shape[0]
