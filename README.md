@@ -125,29 +125,34 @@ We provide examplar code for passkey retrieval in [test_passkey.py](./test_passk
 The results of full KV cache and 50%-constrained KV cache using EasyKV is shown below:
 ```bash
 #Tokens of Prompt: 5144 Passkey target: 89427
+KV cache budget ratio: 100.00%(5144/5144)
+Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 89427.]
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 89427.]
-Llama2-Full:     [What is the pass key? The pass key is 89427.]
+Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 89427.]
 -----------------------------------
 #Tokens of Prompt: 5144 Passkey target: 51906
+KV cache budget ratio: 100.00%(5144/5144)
+Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 51906.]
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 51906.]
-Llama2-Full:     [What is the pass key? The pass key is 51906.]
+Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 51906.]
 -----------------------------------
 #Tokens of Prompt: 5144 Passkey target: 38117
+KV cache budget ratio: 100.00%(5144/5144)
+Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 38117.]
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 38117.]
-Llama2-Full:     [What is the pass key? The pass key is 38117.]
+Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 38117.]
 -----------------------------------
 #Tokens of Prompt: 5144 Passkey target: 60151
+KV cache budget ratio: 100.00%(5144/5144)
+Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 60151.]
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 60151.]
-Llama2-Full:     [What is the pass key? The pass key is 60151.]
+Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 60151.]
 -----------------------------------
 #Tokens of Prompt: 5144 Passkey target: 23789
+KV cache budget ratio: 100.00%(5144/5144)
+Llama2-EasyKV(100.00%):     [What is the pass key? The pass key is 23789.]
 KV cache budget ratio: 50.08%(2576/5144)
-Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 23789.]
-Llama2-Full:     [What is the pass key? The pass key is 23789.]
+Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 23789.]
 ```
 
 ## TODOs
