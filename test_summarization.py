@@ -26,7 +26,6 @@ path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
 model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
-modify_method_of_instance(model, "LlamaAttention", "forward", llama_forward)
 
 # =============== Turn on Fixed KV Cache ==================
 # =============== Here is an example of long prompt encoding mode ===================
