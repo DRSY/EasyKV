@@ -1,4 +1,5 @@
 <h1 align="center">
+<img src="./logo.png" alt="EasyKV" width="250" height="200"/>
 <br>
 EasyKV
 </h1>
