@@ -2,12 +2,8 @@ import warnings
 warnings.filterwarnings("ignore")
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer, AutoConfig)
-from easykv import enable_fixed_kv, gpu_stats
-from utils import modify_method_of_instance, set_dynamicntk_rope_length
-from llama_patch import llama_forward
-from mistral_patch import mistral_forward
+from easykv import enable_fixed_kv, set_dynamicntk_rope_length
 import json
-from functools import partial
 
 # Define the model path and the corresponding prompt template
 MODEL_CONFIGS = {
@@ -17,6 +13,7 @@ MODEL_CONFIGS = {
     'openchat': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--openchat--openchat_v3.2_super/snapshots/aab7ce4d48b31a295a0116b61569d8e87a09bb7a/', template="GPT4 User: {inst}<|end_of_turn|>GPT4 Assistant:"),
     'vicuna_7b': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--lmsys--vicuna-7b-v1.5/snapshots/de56c35b1763eaae20f4d60efd64af0a9091ebe5/', template="A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\n\nUSER: Hello!\nASSISTANT: Hello!</s>\nUSER: {inst}\nASSISTANT:"),
     'wizardlm_7b': dict(path='/cpfs01/user/rensiyu/language_modeling/stanford_alpaca/output_mle_fp16_recycledWiz70k_llama2_7b_512', template="Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{inst}\n\n### Response:"),
+    'vicuna_7b_16k': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--lmsys--vicuna-7b-v1.5-16k/snapshots/c8df3ca4436a3bce5c4b5877e0117032081852b4/', template="A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\n\nUSER: Hello!\nASSISTANT: Hello!</s>\nUSER: {inst}\nASSISTANT:"),
     'alpaca_7b': dict(path='/cpfs01/user/rensiyu/language_modeling/stanford_alpaca/output_mle_recycledAlpaca52k_llama2_7b_512_ds', template="Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{inst}\n\n### Response:"),
     'zephyr_7b': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--HuggingFaceH4--zephyr-7b-beta/snapshots/dc24cabd13eacd3ae3a5fe574bd645483a335a4a/', template="<|system|>\nYou are a friendly chatbot who always responds in a helpful and detailed manner to the user's questions.</s>\n<|user|>\n{inst}</s>\n<|assistant|>\n"),
     'llama2_7b_chat': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/llama2/model_weights_hf/llama-2-7b-chat-hf/', template="[INST] <<SYS>>\nYou are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature. If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.\n<</SYS>>\n{inst}[/INST]"),
@@ -44,6 +41,8 @@ set_dynamicntk_rope_length(model, 5200)
 # Define KV cache eviction policy
 kv_policy = "h2o_head_std_avg"
 
+enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
+
 
 # Test the passkey retrieval task
 for line in open("./passkey_examples_5k.jsonl", "r"):
@@ -56,19 +55,18 @@ for line in open("./passkey_examples_5k.jsonl", "r"):
     print("Passkey target:", example["target"])
 
     # EasyKV generate
-    enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
-    budgets = [0.5]
+    budgets = [0.50]
     for budget in budgets:
         # Define sampling parameters
-        gen_kwargs = dict(
-            temperature=1e-9,
-            top_p=1.0,
-            max_new_tokens=6,
-            budget=budget,
-            kv_policy=kv_policy
-        )
-        output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
-        # gpu_stats()
-        answer= f"Llama2-EasyKV({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
-        answer = answer.replace("\n", "\\n")
-        print(answer)
+        for kv_policy in ['h2o_head_std_avg']:
+            gen_kwargs = dict(
+                temperature=1e-9,
+                top_p=1.0,
+                max_new_tokens=6,
+                budget=budget,
+                kv_policy=kv_policy
+            )
+            output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
+            answer= f"Llama2-EasyKV-{kv_policy}({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
+            answer = answer.replace("\n", "\\n")
+            print(answer)

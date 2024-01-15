@@ -1,13 +1,11 @@
 import torch
 from typing import Tuple
 import math
-from tqdm.auto import tqdm, trange
 import statistics
-import time
-from utils import modify_method_of_instance
-from llama_patch import llama_forward
-from mistral_patch import mistral_forward
 from functools import partial
+from .utils import modify_method_of_instance
+from .llama_patch import llama_forward
+from .mistral_patch import mistral_forward
 
 def cache_size(kv_cache):
     """
@@ -463,11 +461,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
                         cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
-                elif 'h2o_head_decay' == mode or 'h2o_head_decay_avg' == mode:
-                    for l in range(num_layers):
-                        a = decay_factor
-                        attention_map = outputs.attentions[l][0, :, 0, :] # (num_heads, l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
                 elif 'tova' == mode:
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)

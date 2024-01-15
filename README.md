@@ -151,6 +151,15 @@ Llama2-EasyKV(50.00%):     [What is the pass key? The pass key is 23789.]
 ```
 With ```budget``` set to 0.5, we observe 4GB peak GPU VRAM reduction.
 
+## Summarization Example
+We provide examplar code for summarization in [test_summarization.py](./test_summarization.py).
+
+The results of full KV cache and 50%-constrained KV cache using EasyKV is shown below:
+```bash
+EasyKV(100.00%): The 2016 European Championship, also known as Euro 2016, will take place in France from June 10 to July 10, featuring 24 teams, including France, Spain, Germany, England, Wales, and Northern Ireland, with the tournament kicking off with France playing Romania on Friday, June 10, and the final taking place at the Stade de France in Paris on July 10.
+EasyKV(50.00%): The 2016 European Championship, also known as Euro 2016, will be held in France from June 10th to July 10th, featuring 24 teams, including defending champions Spain, and will be marked by a number of changes to the rules of the game, as well as increased security measures due to the ongoing terror threat.
+```
+
 ## TODOs
 - [ ] Integrate with context window extension methods like DynamicNTK.
 
