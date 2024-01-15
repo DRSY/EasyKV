@@ -373,7 +373,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         prompt encoding/prefilling
         """
         length = input_ids.shape[-1]
-        if length <= budget:
+        if budget >= 1.0:
             outputs_prefilling = self(input_ids=input_ids, use_cache=True)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
             logits_prev_step = logits[:, -1, :]
@@ -572,6 +572,8 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device, stride)
             else:
                 cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride)
+            del outputs_prefilling
+            torch.cuda.empty_cache()
             cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
             cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
