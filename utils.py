@@ -1,4 +1,5 @@
 from types import MethodType
+from transformers.models.llama.modeling_llama import LlamaAttention
 
 
 def modify_method_of_instance(instance, target_class_name, target_method_name, new_method, visited_instances=None):
@@ -49,3 +50,8 @@ def modify_method_of_instance(instance, target_class_name, target_method_name, n
                     if isinstance(item, object):
                         modify_method_of_instance(item, target_class_name, target_method_name, new_method, visited_instances)
     
+def set_dynamicntk_rope_length(model, max_length):
+    for name, module in model.named_modules():
+        if isinstance(module, LlamaAttention):
+            module.rotary_emb._set_cos_sin_cache(max_length, device=model.device, dtype=module.rotary_emb.inv_freq.dtype)
+            print(f"{name} DynamicNTKRoPE max length reset to {max_length}")

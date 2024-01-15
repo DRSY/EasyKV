@@ -4,6 +4,15 @@
 EasyKV
 </h1>
 EasyKV is a Pytorch implementation of various eviction policies for ***key-value cache constrained*** generative language model inference.
+<p align="center">
+  <a href="#update">Update</a> •
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#example-usage">Example</a> •
+  <a href="#passkey-retrieval-example">Passkey Retrieval</a> •
+  <a href="#todos">Todos</a> •
+  <a href="#acknowledgement">Acknowledgement</a> •
+</p>
 
 ## Update
 + Uploaded the standalone Pytorch implementation. Pypi package and paper describing the details of our integrated eviction policy design are coming soon.
@@ -69,7 +78,7 @@ gen_kwargs = dict(
     kv_policy=kv_policy
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
-output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
+output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
 #### Auto-regressive Decoding
@@ -99,7 +108,7 @@ gen_kwargs = dict(
     kv_policy=kv_policy
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
-output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
+output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
 ## List of Supported KV Eviction Policies:
@@ -110,8 +119,39 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 + h2o_head_std_avg(for encoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 + h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 
+## Passkey Retrieval Example
+We provide examplar code for passkey retrieval in [test_passkey.py](./test_passkey.py). Specifically, we adopt DynamicNTK scaling to extend the context length of LLaMa2-7B-Chat from 4k to a number that is larger than the maximum tokens in the passages.
+
+The results of full KV cache and 50%-constrained KV cache using EasyKV is shown below:
+```bash
+#Tokens of Prompt: 5144 Passkey target: 89427
+KV cache budget ratio: 50.08%(2576/5144)
+Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 89427.]
+Llama2-Full:     [What is the pass key? The pass key is 89427.]
+-----------------------------------
+#Tokens of Prompt: 5144 Passkey target: 51906
+KV cache budget ratio: 50.08%(2576/5144)
+Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 51906.]
+Llama2-Full:     [What is the pass key? The pass key is 51906.]
+-----------------------------------
+#Tokens of Prompt: 5144 Passkey target: 38117
+KV cache budget ratio: 50.08%(2576/5144)
+Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 38117.]
+Llama2-Full:     [What is the pass key? The pass key is 38117.]
+-----------------------------------
+#Tokens of Prompt: 5144 Passkey target: 60151
+KV cache budget ratio: 50.08%(2576/5144)
+Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 60151.]
+Llama2-Full:     [What is the pass key? The pass key is 60151.]
+-----------------------------------
+#Tokens of Prompt: 5144 Passkey target: 23789
+KV cache budget ratio: 50.08%(2576/5144)
+Llama2-EasyKV(0.5):     [What is the pass key? The pass key is 23789.]
+Llama2-Full:     [What is the pass key? The pass key is 23789.]
+```
+
 ## TODOs
-- [ ] Integrate with context window extension methods like DynamicNTK, Self-Extend.
+- [ ] Integrate with context window extension methods like DynamicNTK.
 
 
 ## Acknowledgement

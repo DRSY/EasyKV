@@ -736,5 +736,5 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
 def enable_fixed_kv(model, tokenizer, mode, stride=1):
     model.tokenizer = tokenizer
     import functools
-    model.generate = functools.partial(generate, self=model, kv_mode=mode, stride=stride)
+    model.easykv_generate = functools.partial(generate, self=model, kv_mode=mode, stride=stride)
     print(f"Fixed KV Cache for {mode} enabled")

@@ -1,12 +1,14 @@
+import warnings
+warnings.filterwarnings("ignore")
 import torch
-from transformers import (AutoModelForCausalLM, AutoTokenizer)
-
+from transformers import (AutoModelForCausalLM, AutoTokenizer, AutoConfig)
 from easykv import enable_fixed_kv
-from utils import modify_method_of_instance
+from utils import modify_method_of_instance, set_dynamicntk_rope_length
 from llama_patch import llama_forward
 from mistral_patch import mistral_forward
+import json
 
-# define the model path and the corresponding prompt template
+# Define the model path and the corresponding prompt template
 MODEL_CONFIGS = {
     'wizardlm_13b': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--WizardLM--WizardLM-13B-V1.2/snapshots/cf5f40382559f19e13874e45b39575171ca46ef8', template="A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\n\nUSER: Hello!\nASSISTANT: Hello!</s>\nUSER: {inst}\nASSISTANT:"),
     'llama2_13b_chat': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--meta-llama--Llama-2-13b-chat-hf/snapshots/c2f3ec81aac798ae26dcc57799a994dfbf521496/', template="[INST] <<SYS>>\nYou are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature. If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.\n<</SYS>>\n{inst}[/INST]"),
@@ -21,35 +23,59 @@ MODEL_CONFIGS = {
     'llama2_13b': dict(path='/cpfs01/shared/public/public_hdd/llmeval/model_weights/hf_hub/models--meta-llama--Llama-2-13b-hf/snapshots/dc1d3b3bfdb69df26f8fc966c16353274b138c55/'),
 }
 
-model_name = 'zephyr_7b'
+# Define model config
+model_name = 'llama2_7b_chat'
 path = MODEL_CONFIGS[model_name]['path']
 template = MODEL_CONFIGS[model_name]['template']
-model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto').eval()
+
+# Enable DynamicNTK for extending LLaMa2 to longer sequences
+config = AutoConfig.from_pretrained(path)
+config.rope_scaling = dict(type="dynamic", factor=2)
+config.max_position_embeddings = 4096
+
+# Load model
+model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map='auto', config=config).eval()
 tokenizer = AutoTokenizer.from_pretrained(path)
+
+# Set the max sequence length before inference to avoid inconsistency of RoPE's base parameter
+set_dynamicntk_rope_length(model, 5200)
+
+# Preparation for fixed KV inference
 modify_method_of_instance(model, "LlamaAttention", "forward", llama_forward)
 
-# =============== Turn on Fixed KV Cache ==================
-# =============== Here is an example of long prompt encoding mode ===================
-for stride in [1,2,4,8,10]:
-    # Setup KV caching mode
-    enable_fixed_kv(model, tokenizer, mode='encoding', stride=stride)
+# Define KV cache eviction policy
+kv_policy = "h2o_head_std_avg"
 
-    # Test input
-    article = "###\nArticle: It was the first time the Single Transferable Vote (STV) system had been used to select two members in the same ward in a by-election. The SNP topped the vote in the Leith Walk by-election, while Scottish Labour won the second seat from the Greens. The by-election was called after Deidre Brock of the SNP and Maggie Chapman of the Scottish Greens stood down. The SNP's John Lewis Ritchie topped the Leith Walk poll with 2,290 votes. He was elected at stage one in the STV process with a swing in first-preference votes of 7.6% from Labour. Labour's Marion Donaldson received 1,623 votes, ahead of Susan Jane Rae of the Scottish Greens on 1,381. Ms Donaldson was elected at stage 10 of the voting process after other preferences had been considered. The by-election was called after Ms Brock stood down when she was elected as the SNP MP for Edinburgh North and Leith in May. Ms Chapman, of the Scottish Greens, resigned from her post to concentrate on standing for the Scottish Parliament in next May's election. The turnout for the by-election was 25.1%. The SNP also held the Midlothian West seat on Midlothian Council with a swing of 6.3% from Labour. The party's Kelly Parry secured 1,540 votes, ahead of Labour's Ian Miller on 945 votes. The by-election was called after Owen Thompson was elected as SNP MP for the Midlothian constituency.\n\nSummarize the above article in 1 sentence.\n"
-    prompt = f"Write a SHORT summary of the following text delimited by triple backticks. Return your response which covers the key points of the text.\n```{article}```"
-    input_prompt = template.format(inst=prompt)
 
-    # Inference with fixed kv cache applied to prompt encoding phase
-    # define eviction policy
-    kv_policy = 'h2o_head_std_avg'
-    # define sampling parameters
-    gen_kwargs = dict(
-        temperature=1e-9,
-        top_p=1.0,
-        max_new_tokens=256,
-        budget=0.5,
-        kv_policy=kv_policy
-    )
-    input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
-    output = model.generate(input_ids=input_ids, generation_config=gen_kwargs)
-    print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
+# Test the passkey retrieval task
+for line in open("./passkey_examples_5k.jsonl", "r"):
+    example = json.loads(line)
+    prompt_postfix = "What is the pass key? The pass key is "
+    prompt = example["input"] + prompt_postfix
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.cuda()
+    print("-----------------------------------")
+    print(f"#Tokens of Prompt:", input_ids.shape[1], end=" ")
+    print("Passkey target:", example["target"])
+
+    # EasyKV generate
+    enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
+    budgets = [0.5,0.4,0.3]
+    for budget in budgets:
+        # Define sampling parameters
+        gen_kwargs = dict(
+            temperature=1e-9,
+            top_p=1.0,
+            max_new_tokens=6,
+            budget=budget,
+            kv_policy=kv_policy
+        )
+        output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
+        answer= f"Llama2-EasyKV({gen_kwargs['budget']*100:.2f}%):     [" + prompt_postfix + output  + "]"
+        answer = answer.replace("\n", "\\n")
+        print(answer)
+
+    # HF full KV cache generate
+    tokens = model.generate(input_ids=input_ids, max_new_tokens=6)
+    answer= "Llama2-Full:     [" + prompt_postfix + tokenizer.decode(tokens[0].tolist()[input_ids.shape[1]:], skip_special_tokens=True)  + "]"
+    answer = answer.replace("\n", "\\n")
+    print(answer)
