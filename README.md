@@ -13,10 +13,12 @@ EasyKV is a Pytorch implementation of various eviction policies for ***key-value
   <a href="#passkey-retrieval-example">Passkey Retrieval</a> •
   <a href="#summarization-example">Summarization</a> •
   <a href="#instruction-following">Instruction Following</a> •
+  <a href="#perplexity">Perplexity</a> •
   <a href="#acknowledgement">Acknowledgement</a>
 </p>
 
 ## Update
++ [2024.1.17] Add examples for [perplexity computation](#perplexity) using LLaMa2-13B and DynamicNTK.
 + [2024.1.16] Add examples for [Instruction Following](#instruction-following) using LLaMa2-7B-Chat.
 + [2024.1.15] Add examples for [Passkey Retrieval](#passkey-retrieval-example) using long-context LLM(Vicuna-7B-16K) and DynamicNTK-scaled LLaMa2-7B-Chat.
 + [2024.1.15] Add examples for [Summarization](#summarization-example) using LLaMa2-7B-Chat.
@@ -272,6 +274,23 @@ Thank you for your question! There are many talented actors who have started the
 9. Bette Midler: Midler got her start on Broadway in the musical "Fiddler on the Roof" before going on to star in the TV show "The Rose" and the movie "Hocus Pocus."
 10. John Leguizamo: Leguizamo got his start on Broadway in the play "A Day in the Death of Jose Marti" before going on to star in numerous TV shows and movies, including "ER" and "Ice Age."
 These are just a few examples of actors who got their start on Broadway. There are many other talented actors who have also gotten their start on the Great White Way.
+```
+
+### Perplexity
+We provide examplar code for perplexity computation in [test_ppl.py](./test_ppl.py).
+The result with LLaMa2-13B with DynamicNTK on 10000-token document([doc.txt](./doc.txt)) is shown below:
+```bash
+DynamicNTKRoPE max length reset to 11000
+Fixed KV Cache for ppl enabled
+
+Input token length: 10253
+EasyKV-recency-100.00% PPL: 7.44
+------------------------------------------
+KV cache budget ratio: 50.38%(5165/10253)
+EasyKV-recency-50.00% PPL: 7.68
+------------------------------------------
+KV cache budget ratio: 50.38%(5165/10253)
+EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
 ```
 
 ## List of Supported KV Eviction Policies:

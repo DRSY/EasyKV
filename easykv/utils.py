@@ -54,4 +54,4 @@ def set_dynamicntk_rope_length(model, max_length):
     for name, module in model.named_modules():
         if isinstance(module, LlamaAttention):
             module.rotary_emb._set_cos_sin_cache(max_length, device=model.device, dtype=module.rotary_emb.inv_freq.dtype)
-            print(f"{name} DynamicNTKRoPE max length reset to {max_length}")
+    print(f"DynamicNTKRoPE max length reset to {max_length}")

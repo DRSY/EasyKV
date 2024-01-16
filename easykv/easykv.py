@@ -174,11 +174,11 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
     (2). short input, long output
     mode in [silo, liso]
     """
-    temperature = generation_config['temperature']
-    top_p = generation_config['top_p']
-    max_new_tokens = generation_config['max_new_tokens']
-    budget = generation_config['budget']
-    mode = generation_config['kv_policy']
+    temperature = generation_config.get('temperature', 1.0)
+    top_p = generation_config.get('top_p', 1.0)
+    max_new_tokens = generation_config.get('max_new_tokens', 1024)
+    budget = generation_config.get('budget', 0.5)
+    mode = generation_config.get('kv_policy', 'recency')
     temp_length = generation_config.get('temp_length', 4)
     recent_ratio = generation_config.get('recent_ratio', 0.1)
     keep_attention = generation_config.get('keep_attention', False)
@@ -549,44 +549,55 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         perplexity computation with fixed kv cache
         """
         length = input_ids.shape[-1]
-        if length <= budget:
-            outputs_prefilling = self(input_ids=input_ids, use_cache=True)
-            past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
-            logits_prev_step = logits[:, -1, :]
-            prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
-            cur_pos_id = past_key_values[0][0].shape[2]
+        if budget >= 1.0:
+            outputs_prefilling = self(input_ids=input_ids, use_cache=False)
+            logits = outputs_prefilling.logits
+            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+            log_probs = loss_fct(logits[0, :-1], input_ids.clone()[0, 1:]).cpu().numpy().tolist()
+            ppl = math.exp(statistics.mean(log_probs))
+            return ppl
         else:
-            budget = int(length * budget)
+            # In case budget is also large, the attention_map will occupy a lot of memory
+            # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
+            if 'llama' in self.config.architectures[0].lower():
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+            else:
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
+            budget = int(length * budget) + stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
             prefix = input_ids[:, :idx]
             recent_window = int(budget*recent_ratio)
-            decay_factor = math.exp(math.log(0.001) / budget)
-            sink_length = 4
-            outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=True)
+            sink_length = temp_length
+            outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
+            all_ids = [prefix[0]]
+            all_logits = [outputs_prefilling.logits[0]]
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
             loss = loss_fct(logits[:, :-1].view(-1, logits.shape[-1]), prefix[:, 1:].clone().view(-1))
-            prefix_prob = torch.exp(-loss).cpu().numpy().tolist()
             logits_prev_step = logits[:, -1, :]
             _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
-            cache_probs = [1.0] + prefix_prob
-            cache_cur_probs = []
-            cache_positions = list(range(prefix.shape[-1]))
-            outputs_prefilling.attentions = list(outputs_prefilling.attentions)
-            for l in range(num_layers):
-                bs = outputs_prefilling.attentions[l].shape[0]
-                sl = outputs_prefilling.attentions[l].shape[2]
-                tl = outputs_prefilling.attentions[l].shape[3]
-                outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
-            if 'decay' in mode and not 'prob' in mode:
-                cache_attn_scores = h2o_head_decay_score(outputs_prefilling.attentions, decay_factor, self.device, stride)
+            if keep_attention:
+                outputs_prefilling.attentions = list(outputs_prefilling.attentions)
+                for l in range(num_layers):
+                    bs = outputs_prefilling.attentions[l].shape[0]
+                    sl = outputs_prefilling.attentions[l].shape[2]
+                    tl = outputs_prefilling.attentions[l].shape[3]
+                    outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+            cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
+            # Back to GPU
+            if 'llama' in self.config.architectures[0].lower():
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
             else:
-                cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride)
-            cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
-            cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+
+            if keep_attention:
+                cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
+                cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
+            else:
+                cache_counter = torch.tensor([[[float(stride)]*idx+torch.arange(stride, 0, -1).numpy().tolist() for _ in range(num_heads)] for _ in range(num_layers)], device=self.device) - float(stride)
             cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
             cache_counter_token = torch.cumsum(cache_counter_token, dim=-1).flip(dims=(0, )) - float(stride)
             n = 0
@@ -605,10 +616,8 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                                 output_attentions=True)
                 past_key_values = outputs.past_key_values
                 logits_prev_step = outputs.logits[:, -1, :]
-                log_probs.append(-raw_prob_prev_step.gather(dim=-1, index=input_ids[:, token_i].unsqueeze(-1)).log().cpu().item())
-                n_log_probs = torch.nn.CrossEntropyLoss(reduction='none')(outputs.logits[:, :-1].view(-1, logits_prev_step.shape[-1]), input_ids[:, token_i+1:token_i+stride].view(-1)).view(-1)
-                log_probs.extend(n_log_probs.cpu().numpy().tolist())
-                cache_cur_probs.append(torch.exp(-entropy(raw_prob_prev_step))[0].cpu().item())
+                all_logits.append(outputs.logits[0])
+                all_ids.append(input_ids[0, token_i:token_i+stride])
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
@@ -619,8 +628,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     tl = outputs.attentions[l].shape[3]
                     outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
-                # update 
-                for pos_ in range(stride): cache_positions.append(cur_pos_id+pos_)
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
                     for l in range(num_layers):
@@ -632,11 +639,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
                         cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
-                elif 'h2o_head_decay' == mode or 'h2o_head_decay_avg' == mode:
-                    for l in range(num_layers):
-                        a = decay_factor
-                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
                 elif 'tova' == mode:
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
@@ -646,9 +648,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 if mode != 'full':
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
-                    positions_tensor = torch.tensor(cache_positions, device=self.device).float()
-                    positions_tensor = positions_tensor / float(cur_pos_id)
-                    if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob', 'h2o_head_prob_avg', 'h2o_head_probv2', 'h2o_head_probv2_avg', 'h2o_head_decay_prob', 'h2o_head_decay_probv2', 'h2o_head_decay_prob_avg', 'h2o_head_decay_probv2_avg']:
+                    if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
                         if not 'avg' in mode:
                             eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         else:
@@ -659,7 +659,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std', 'h2o_head_std_avg', 'h2o_head_probv2_std', 'h2o_head_probv2_std_avg']:
+                    elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
                         cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
@@ -684,27 +684,28 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                     elif mode == 'recency':
-                        evict_id = sink_length-stride
+                        evict_id = sink_length
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
-                        evicted_positions.append(cache_positions[evict_id])
                     elif mode == 'random':
-                        scores = torch.rand(*positions_tensor.shape).to(self.device)
+                        scores = torch.rand(cache_attn_scores.shape[-1]).to(self.device)
                         scores[-stride:] = -1e9
                         _, evict_id = torch.topk(scores, k=1, dim=-1)
                         evict_id = evict_id[0].cpu().item()
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
-                        evicted_positions.append(cache_positions[evict_id])
-                        for _ in range(stride):
-                            cache_positions.pop(evict_id)
                 cur_pos_id += stride
-        cur_pos_id = input_ids.shape[-1]
-        _tmp = past_key_values[0][0].shape[2]
-        print(f"KV cache budget ratio: {_tmp / input_ids.shape[-1]*100:.2f}%({_tmp}/{input_ids.shape[-1]})")
-        ppl = math.exp(statistics.mean(log_probs))
-        return past_key_values, cur_pos_id, ppl
+            cur_pos_id = input_ids.shape[-1]
+            _tmp = past_key_values[0][0].shape[2]
+            print(f"KV cache budget ratio: {_tmp / input_ids.shape[-1]*100:.2f}%({_tmp}/{input_ids.shape[-1]})")
+            all_ids = torch.cat(all_ids)
+            all_logits = torch.cat(all_logits, dim=0)
+            assert all_ids.shape[0] == all_logits.shape[0]
+            log_probs = loss_fct(all_logits[:-1], all_ids[1:]).cpu().numpy().tolist()
+            ppl = math.exp(statistics.mean(log_probs))
+            return ppl
 
 def enable_fixed_kv(model, tokenizer, mode, stride=1):
     model.tokenizer = tokenizer
     import functools
     model.easykv_generate = functools.partial(generate, self=model, kv_mode=mode, stride=stride)
+    model.easykv_ppl = functools.partial(generate, self=model, kv_mode='ppl', stride=stride)
     print(f"Fixed KV Cache for {mode} enabled")
