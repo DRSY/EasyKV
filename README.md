@@ -302,6 +302,11 @@ EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
 + h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 
 
+## Todos
++ [ ] Add [LongBench](https://github.com/THUDM/LongBench/tree/main?tab=readme-ov-file#how-to-evaluate-on-LongBench) evaluation.
++ [ ] Add filtering mechanism to prevent dropping KV cache of specified tokens.
+
+
 ## Acknowledgement
 ```latex
 @article{xiao2023efficient,
