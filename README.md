@@ -284,7 +284,7 @@ DynamicNTKRoPE max length reset to 11000
 Fixed KV Cache for ppl enabled
 
 Input token length: 10253
-EasyKV-recency-100.00% PPL: 7.44
+EasyKV-100.00% PPL: 7.44
 ------------------------------------------
 KV cache budget ratio: 50.38%(5165/10253)
 EasyKV-recency-50.00% PPL: 7.68
