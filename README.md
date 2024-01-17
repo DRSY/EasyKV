@@ -306,6 +306,7 @@ EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
 ## Todos
 + [ ] Add [LongBench](https://github.com/THUDM/LongBench/tree/main?tab=readme-ov-file#how-to-evaluate-on-LongBench) evaluation.
 + [ ] Add filtering mechanism to prevent dropping KV cache of specified tokens.
++ [ ] Add ```auto``` mode so that users don't have to manually specify ```encoding``` or ```decoding```.
 
 
 ## Acknowledgement

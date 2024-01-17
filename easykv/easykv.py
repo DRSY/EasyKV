@@ -168,12 +168,6 @@ def h2o_head_score(attention_map, device, stride, budget, num_layers, num_heads,
 
 @torch.inference_mode()
 def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
-    """
-    generation utility function suppr=orting:
-    (1). long input, short output
-    (2). short input, long output
-    mode in [silo, liso]
-    """
     temperature = generation_config.get('temperature', 1.0)
     top_p = generation_config.get('top_p', 1.0)
     max_new_tokens = generation_config.get('max_new_tokens', 1024)
@@ -199,7 +193,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
         logits_prev_step = logits[:, -1, :]
         prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
-        decay_factor = math.exp(math.log(0.001) / budget)
 
         cache_tokens = []
         cache_probs = []
@@ -381,7 +374,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         prompt encoding/prefilling
         """
         length = input_ids.shape[-1]
-        if budget >= 1.0:
+        if type(budget) == float and budget >= 1.0 or type(budget) == int and budget >= length:
             outputs_prefilling = self(input_ids=input_ids, use_cache=True)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
             logits_prev_step = logits[:, -1, :]
@@ -394,18 +387,18 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
             else:
                 modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
-            budget = int(length * budget) + stride
+            if type(budget) == float:
+                budget = int(length * budget) + stride
+            elif type(budget) == int: 
+                budget += stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
             prefix = input_ids[:, :idx]
             recent_window = int(budget*recent_ratio)
-            decay_factor = math.exp(math.log(0.001) / budget)
             sink_length = temp_length
             outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-            loss = loss_fct(logits[:, :-1].view(-1, logits.shape[-1]), prefix[:, 1:].clone().view(-1))
-            prefix_prob = torch.exp(-loss).cpu().numpy().tolist()
             logits_prev_step = logits[:, -1, :]
             _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
@@ -513,7 +506,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                     elif mode == 'recency':
-                        evict_id = sink_length-stride
+                        evict_id = sink_length
                         past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
                     elif mode == 'random':
                         scores = torch.rand(cache_attn_scores.shape[-1]).to(self.device)
