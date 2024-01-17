@@ -184,6 +184,15 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
     is_gqa = hasattr(self.config, "num_key_value_heads") and getattr(self.config, "num_key_value_heads") != getattr(self.config, "num_attention_heads")
     if is_gqa: rep_n = self.config.num_attention_heads // self.config.num_key_value_heads
     else: rep_n = 1
+    length = input_ids.shape[-1]
+    if kv_mode == 'auto':
+        length = input_ids.shape[-1]
+        assert type(budget) == int
+        if budget > length:
+            kv_mode = 'decoding'
+            budget -= length
+        else:
+            kv_mode = 'encoding_decoding'
     if kv_mode == 'decoding':
         """
         auto-regressive decoding
@@ -535,6 +544,249 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             logits_prev_step = outputs.logits[:, -1, :]
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             cur_pos_id += 1
+        decoded_output = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+        return decoded_output
+    elif kv_mode == 'encoding_decoding':
+        """
+        after encoding, budget-1 decoding
+        """
+        length = input_ids.shape[-1]
+        assert type(budget) == int and budget <= length
+        white_lst = ['random', 'recency', 'tova', 'h2o_head_std_avg']
+        assert mode in white_lst, f"mode must be within {white_lst}, get {mode} instead"
+        # In case budget is also large, the attention_map will occupy a lot of memory
+        # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
+        if 'llama' in self.config.architectures[0].lower():
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+        else:
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
+        if type(budget) == float:
+            budget = int(length * budget) + stride
+        elif type(budget) == int: 
+            budget += stride
+        for idx in range(budget, -1, -1):
+            if (length-idx)%stride==0: break
+        prefix = input_ids[:, :idx]
+        recent_window = int(budget*recent_ratio)
+        sink_length = temp_length
+        outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
+        past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
+        loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+        logits_prev_step = logits[:, -1, :]
+        _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
+        prefix_token_lst = input_ids[0].cpu().numpy().tolist()
+        cache_tokens = prefix[0].cpu().numpy().tolist()
+        if keep_attention:
+            outputs_prefilling.attentions = list(outputs_prefilling.attentions)
+            for l in range(num_layers):
+                bs = outputs_prefilling.attentions[l].shape[0]
+                sl = outputs_prefilling.attentions[l].shape[2]
+                tl = outputs_prefilling.attentions[l].shape[3]
+                outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+        cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
+        # Back to GPU
+        if 'llama' in self.config.architectures[0].lower():
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+        else:
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+
+        if keep_attention:
+            cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
+            cache_counter = torch.cumsum(cache_counter, dim=-1).flip(dims=(2,)) - float(stride)
+        else:
+            cache_counter = torch.tensor([[[float(stride)]*idx+torch.arange(stride, 0, -1).numpy().tolist() for _ in range(num_heads)] for _ in range(num_layers)], device=self.device) - float(stride)
+        cache_counter_token = torch.tensor([1.0]*(idx+stride), device=self.device)
+        cache_counter_token = torch.cumsum(cache_counter_token, dim=-1).flip(dims=(0, )) - float(stride)
+        n = 0
+        output_ids = []
+        token_probs = []
+        cur_pos_id = past_key_values[0][0].shape[2]
+        evicted_positions = []
+        log_probs = []
+        for token_i in range(idx, length, stride):
+            n += stride
+            outputs = self(input_ids=input_ids[:, token_i:token_i+stride],
+                            past_key_values=past_key_values,
+                            attention_mask=torch.ones(1, stride+past_key_values[0][0].shape[2], dtype=torch.long, device=self.device),
+                            position_ids=torch.LongTensor(list(range(cur_pos_id, cur_pos_id+stride))).to(self.device).view(1, -1),
+                            use_cache=True,
+                            output_attentions=True)
+            past_key_values = outputs.past_key_values
+            logits_prev_step = outputs.logits[:, -1, :]
+            prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
+
+            # Unified processing for MQA, GQA and MHA
+            outputs.attentions = list(outputs.attentions)
+            for l in range(num_layers):
+                bs = outputs.attentions[l].shape[0]
+                sl = outputs.attentions[l].shape[2]
+                tl = outputs.attentions[l].shape[3]
+                outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+
+            # update accumulated attention scores
+            if 'h2o_head' == mode or 'h2o_head_avg' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+            elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
+                    attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                    cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
+            elif 'tova' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
+            # evict if current kv cache size exceeds the budget
+            cur_kv_size = past_key_values[0][0].shape[2]
+            if mode != 'full':
+                cache_counter += float(stride)
+                cache_counter_token += float(stride)
+                if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
+                    if not 'avg' in mode:
+                        eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
+                    else:
+                        eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window] / cache_counter[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
+                    past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
+                    _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                    _src = torch.zeros(num_layers, num_heads, stride, device=self.device).view(num_layers*num_heads, -1)
+                    mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                    cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                    cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
+                elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                    cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
+                    cur_std[:, :, -10:] = 1e9
+                    cur_std[:, :, :sink_length] = 1e9
+                    _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
+                    if 'avg' in mode:
+                        argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
+                    else:
+                        argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
+                    eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
+                    past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
+                    _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                    _src = torch.zeros(num_layers, num_heads, stride, device=self.device).view(num_layers*num_heads, -1)
+                    mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                    cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                    cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                    cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
+                elif mode == 'tova':
+                    eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
+                    past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
+                    _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                    _src = torch.zeros(num_layers, num_heads, stride, device=self.device).view(num_layers*num_heads, -1)
+                    mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                    cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                elif mode == 'recency':
+                    evict_id = sink_length
+                    past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
+                elif mode == 'random':
+                    scores = torch.rand(cache_attn_scores.shape[-1]).to(self.device)
+                    scores[-stride:] = -1e9
+                    _, evict_id = torch.topk(scores, k=1, dim=-1)
+                    evict_id = evict_id[0].cpu().item()
+                    past_key_values = truncate_kv_cache(past_key_values, start=evict_id, end=evict_id+stride)
+            cur_pos_id += stride
+        cur_pos_id = input_ids.shape[-1]
+        _tmp = past_key_values[0][0].shape[2]
+        n = 0
+        output_ids = []
+        cache_attn_scores = cache_attn_scores[:, :, :-(stride-1)]
+        cache_attn_scores_square = cache_attn_scores_square[:, :, :-(stride-1)]
+        cache_counter = cache_counter[:, :, :-(stride-1)]
+        assert cache_attn_scores.shape[-1] == _tmp+1
+        while n < max_new_tokens:
+            next_token = torch.multinomial(prob_prev_step, num_samples=1)
+            output_ids.append(next_token[0, 0].cpu().item())
+            next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
+            n += 1
+            if output_ids[-1] == tokenizer.eos_token_id: break
+            outputs = self(input_ids=next_token, 
+                            past_key_values=past_key_values,
+                            attention_mask=torch.ones(next_token.shape[0], 1+past_key_values[0][0].shape[2], dtype=torch.long, device=self.device),
+                            position_ids=torch.LongTensor([cur_pos_id]).to(self.device).view(-1, 1),
+                            use_cache=True,
+                            output_attentions=True)
+            # unified processing for GQA and MHA
+            outputs.attentions = list(outputs.attentions)
+            for l in range(num_layers):
+                bs = outputs.attentions[l].shape[0]
+                sl = outputs.attentions[l].shape[2]
+                tl = outputs.attentions[l].shape[3]
+                outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+            past_key_values = outputs.past_key_values
+            logits_prev_step = outputs.logits[:, -1, :]
+            prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
+
+            # update accumulated attention scores
+            if 'h2o_head' == mode or 'h2o_head_avg' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, 0, :]
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+            elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, 0, :]
+                    attention_map_sq = ((outputs.attentions[l][0, :, 0, :])**2)
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                    cache_attn_scores_square[l, :, :attention_map_sq.shape[-1]] += attention_map_sq
+            elif 'tova' == mode:
+                for l in range(num_layers):
+                    attention_map = outputs.attentions[l][0, :, 0, :]
+                    cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
+            cache_counter += 1.0
+            recent_ratio = 0.3
+            recent_window = int(budget*recent_ratio)
+            if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob', 'h2o_head_prob_avg', 'h2o_head_probv2', 'h2o_head_probv2_avg', 'h2o_head_decay_prob', 'h2o_head_decay_probv2', 'h2o_head_decay_prob_avg', 'h2o_head_decay_probv2_avg']:
+                if not 'avg' in mode:
+                    eviction_ids = torch.argmin(cache_attn_scores[:, :, :-recent_window], dim=-1)
+                else:
+                    eviction_ids = torch.argmin(cache_attn_scores[:, :, :-recent_window] / cache_counter[:, :, :-recent_window], dim=-1)
+                _eviction_ids = eviction_ids
+                eviction_ids = eviction_ids.cpu().numpy().tolist()
+                past_key_values = truncate_kv_cache_silo(past_key_values, eviction_ids)
+                _index = torch.arange(cache_attn_scores.shape[-1], device=self.device).unsqueeze(0).unsqueeze(0).repeat(num_layers, num_heads, 1)
+                mask = (_eviction_ids.unsqueeze(-1)!=_index).view(-1, _index.shape[-1])
+                cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+                if 'avg' in mode:
+                    cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+            elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
+                cur_std[:, :, -10:] = 1e9
+                _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window, dim=-1) # (layers, heads, k)
+                if 'avg' in mode:
+                    argmin_id = torch.argmin(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1).unsqueeze(-1) # (layers, heads)
+                else:
+                    argmin_id = torch.argmin(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1).unsqueeze(-1) # (layers, heads)
+                eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id).squeeze(-1)
+                _eviction_ids = eviction_ids
+                eviction_ids = eviction_ids.cpu().numpy().tolist()
+                past_key_values = truncate_kv_cache_silo(past_key_values, eviction_ids)
+                _index = torch.arange(cache_attn_scores.shape[-1], device=self.device).unsqueeze(0).unsqueeze(0).repeat(num_layers, num_heads, 1)
+                mask = (_eviction_ids.unsqueeze(-1)!=_index).view(-1, _index.shape[-1])
+                cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+                cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+                if 'avg' in mode:
+                    cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+            elif mode == 'tova':
+                eviction_ids = torch.argmin(cache_attn_scores, dim=-1)
+                _eviction_ids = eviction_ids
+                eviction_ids = eviction_ids.cpu().numpy().tolist()
+                past_key_values = truncate_kv_cache_silo(past_key_values, eviction_ids)
+                _index = torch.arange(cache_attn_scores.shape[-1], device=self.device).unsqueeze(0).unsqueeze(0).repeat(num_layers, num_heads, 1)
+                mask = (_eviction_ids.unsqueeze(-1)!=_index).view(-1, _index.shape[-1])
+                cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
+            elif mode == 'recency':
+                past_key_values = truncate_kv_cache(past_key_values, start=sink_length, end=sink_length+1)
+            elif mode == 'random':
+                scores = torch.rand(*positions_tensor.shape).to(self.device)
+                _, evict_id = torch.topk(scores, k=1, dim=-1)
+                evict_id = evict_id[0].cpu().item()
+                past_key_values = truncate_kv_cache(past_key_values, start=sink_length+evict_id, end=sink_length+evict_id+1)
+            cur_pos_id += 1
+        cache_size = past_key_values[0][0].shape[2]
+        total_length = length + len(output_ids)
+        print(f"KV Cache Budget ratio {cache_size / total_length*100:.2f}%[{cache_size}/({length}+{len(output_ids)})]")
         decoded_output = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
         return decoded_output
     elif kv_mode == 'ppl':

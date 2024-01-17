@@ -19,6 +19,7 @@ EasyKV is a Pytorch package dedicated for ***key-value cache constrained*** gene
 </p>
 
 ## Update
++ [2024.1.17] Add ```auto``` mode. See [example](#auto-mode).
 + [2024.1.17] Add examples for [perplexity computation](#perplexity) using LLaMa2-13B and DynamicNTK.
 + [2024.1.16] Add examples for [Instruction Following](#instruction-following) using LLaMa2-7B-Chat.
 + [2024.1.15] Add examples for [Passkey Retrieval](#passkey-retrieval-example) using long-context LLM(Vicuna-7B-16K) and DynamicNTK-scaled LLaMa2-7B-Chat.
@@ -113,6 +114,23 @@ gen_kwargs = dict(
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
 print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
+```
+### Auto Mode
+In case both the prompt and generation are long, ```auto``` mode can help automatically handle KV cache throught the prefilling and decoding stages.
+```bash
+stride = 64 # stride for sliding window
+kv_policy = "h2o_head_std_avg" # cache eviction policy
+budget = 1024 # an integer specifying the maximum KV cache
+enable_fixed_kv(model, tokenizer, mode='auto', stride=stride)
+gen_kwargs = dict(
+    temperature=1e-9,
+    top_p=1.0,
+    max_new_tokens=64,
+    budget=budget, 
+    kv_policy=kv_policy,
+    keep_attention=False # set to True if your DRAM is not tight and you can get better performance
+)
+output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
 ```
 
 ### Passkey Retrieval Example
@@ -304,9 +322,9 @@ EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
 
 
 ## Todos
++ [x] Add ```auto``` mode so that users don't have to manually specify ```encoding``` or ```decoding```.
 + [ ] Add [LongBench](https://github.com/THUDM/LongBench/tree/main?tab=readme-ov-file#how-to-evaluate-on-LongBench) evaluation.
 + [ ] Add filtering mechanism to prevent dropping KV cache of specified tokens.
-+ [ ] Add ```auto``` mode so that users don't have to manually specify ```encoding``` or ```decoding```.
 
 
 ## Acknowledgement
