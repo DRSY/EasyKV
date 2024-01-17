@@ -117,7 +117,7 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ```
 ### Auto Mode
 In case both the prompt and generation are long, ```auto``` mode can help automatically handle KV cache throught the prefilling and decoding stages.
-```bash
+```python
 stride = 64 # stride for sliding window
 kv_policy = "h2o_head_std_avg" # cache eviction policy
 budget = 1024 # an integer specifying the maximum KV cache
