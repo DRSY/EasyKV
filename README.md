@@ -19,6 +19,7 @@ EasyKV is a Pytorch package dedicated for ***key-value cache constrained*** gene
 </p>
 
 ## Update
++ [2024.1.19] Add support for stopping condition during generation.
 + [2024.1.17] Add ```auto``` mode. See [example](#auto-mode).
 + [2024.1.17] Add examples for [perplexity computation](#perplexity) using LLaMa2-13B and DynamicNTK.
 + [2024.1.16] Add examples for [Instruction Following](#instruction-following) using LLaMa2-7B-Chat.
@@ -80,7 +81,8 @@ gen_kwargs = dict(
     max_new_tokens=256,
     budget=0.5,
     kv_policy=kv_policy,
-    keep_attention=False # set to True if your DRAM is not tight and you can get better performance
+    keep_attention=False, # set to True if your DRAM is not tight and you can get better performance
+    eos_token_ids=[tokenizer.eos_token_id]
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
@@ -110,6 +112,7 @@ gen_kwargs = dict(
     max_new_tokens=2048,
     budget=200,
     kv_policy=kv_policy,
+    eos_token_ids=[tokenizer.eos_token_id]
 )
 input_ids = tokenizer([input_prompt], return_tensors='pt').input_ids.to(model.device)
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
@@ -128,7 +131,8 @@ gen_kwargs = dict(
     max_new_tokens=64,
     budget=budget, 
     kv_policy=kv_policy,
-    keep_attention=False # set to True if your DRAM is not tight and you can get better performance
+    keep_attention=False, # set to True if your DRAM is not tight and you can get better performance
+    eos_token_ids=[tokenizer.eos_token_id]
 )
 output = model.easykv_generate(input_ids=input_ids, generation_config=gen_kwargs)
 ```

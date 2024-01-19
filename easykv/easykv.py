@@ -176,6 +176,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
     temp_length = generation_config.get('temp_length', 4)
     recent_ratio = generation_config.get('recent_ratio', 0.1)
     keep_attention = generation_config.get('keep_attention', False)
+    eos_token_ids = generation_config.get('eos_token_ids', [self.tokenizer.eos_token_id])
     num_layers = self.config.num_hidden_layers
     if not hasattr(self.config, "num_key_value_heads"): num_heads = self.config.num_attention_heads
     else: num_heads = self.config.num_key_value_heads
@@ -225,7 +226,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
             token_probs.append((tokenizer.convert_ids_to_tokens([output_ids[-1]])[0], next_token_prob[0, 0].cpu().item()))
             n += 1
-            if output_ids[-1] == tokenizer.eos_token_id: break
+            if output_ids[-1] in eos_token_ids: break
             outputs = self(input_ids=next_token, 
                             past_key_values=past_key_values,
                             attention_mask=torch.ones(next_token.shape[0], 1+past_key_values[0][0].shape[2], dtype=torch.long, device=next_token.device),
@@ -534,7 +535,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             output_ids.append(next_token[0, 0].cpu().item())
             next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
             n += 1
-            if output_ids[-1] == tokenizer.eos_token_id: break
+            if output_ids[-1] in eos_token_ids: break
             outputs = self(input_ids=next_token, 
                             past_key_values=past_key_values,
                             attention_mask=torch.ones(next_token.shape[0], 1+past_key_values[0][0].shape[2], dtype=torch.long, device=self.device),
@@ -564,6 +565,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             budget = int(length * budget) + stride
         elif type(budget) == int: 
             budget += stride
+            if budget >= length: budget -= stride
         for idx in range(budget, -1, -1):
             if (length-idx)%stride==0: break
         prefix = input_ids[:, :idx]
@@ -701,7 +703,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             output_ids.append(next_token[0, 0].cpu().item())
             next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
             n += 1
-            if output_ids[-1] == tokenizer.eos_token_id: break
+            if output_ids[-1] in eos_token_ids: break
             outputs = self(input_ids=next_token, 
                             past_key_values=past_key_values,
                             attention_mask=torch.ones(next_token.shape[0], 1+past_key_values[0][0].shape[2], dtype=torch.long, device=self.device),
