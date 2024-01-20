@@ -167,7 +167,7 @@ def h2o_head_score(attention_map, device, stride, budget, num_layers, num_heads,
 
 
 @torch.inference_mode()
-def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
+def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, report_decoding_latency: bool=False):
     temperature = generation_config.get('temperature', 1.0)
     top_p = generation_config.get('top_p', 1.0)
     max_new_tokens = generation_config.get('max_new_tokens', 1024)
@@ -394,16 +394,19 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             # In case budget is also large, the attention_map will occupy a lot of memory
             # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
             if type(budget) == float:
                 budget = int(length * budget) + stride
             elif type(budget) == int: 
                 budget += stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
-            prefix = input_ids[:, :idx]
+            for r_idx in range(1, idx):
+                if (idx-r_idx)%stride==0: break
+            # prefix = input_ids[:, :idx]
+            prefix = input_ids[:, :r_idx]
             recent_window = int(budget*recent_ratio)
             sink_length = temp_length
             outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
@@ -440,7 +443,8 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             cur_pos_id = past_key_values[0][0].shape[2]
             evicted_positions = []
             log_probs = []
-            for token_i in range(idx, length, stride):
+            # for token_i in range(idx, length, stride):
+            for token_i in range(r_idx, length, stride):
                 n += stride
                 outputs = self(input_ids=input_ids[:, token_i:token_i+stride],
                                 past_key_values=past_key_values,
@@ -460,24 +464,25 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     tl = outputs.attentions[l].shape[3]
                     outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
-                # update accumulated attention scores
-                if 'h2o_head' == mode or 'h2o_head_avg' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
-                        attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                        cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
-                elif 'tova' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
-                # evict if current kv cache size exceeds the budget
                 cur_kv_size = past_key_values[0][0].shape[2]
-                if mode != 'full':
+                # update accumulated attention scores
+                if cur_kv_size>idx or keep_attention:
+                    if 'h2o_head' == mode or 'h2o_head_avg' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
+                            attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                            cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
+                    elif 'tova' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
+                # evict if current kv cache size exceeds the budget
+                if mode != 'full' and cur_kv_size>idx:
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
                     if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
@@ -530,12 +535,15 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         print(f"KV cache budget ratio: {_tmp / input_ids.shape[-1]*100:.2f}%({_tmp}/{input_ids.shape[-1]})")
         n = 0
         output_ids = []
+        decoding_times = []
+        import time
         while n < max_new_tokens:
             next_token = torch.multinomial(prob_prev_step, num_samples=1)
             output_ids.append(next_token[0, 0].cpu().item())
             next_token_prob = torch.gather(raw_prob_prev_step, -1, next_token) # (bsz, 1)
             n += 1
             if output_ids[-1] in eos_token_ids: break
+            s = time.time()
             outputs = self(input_ids=next_token, 
                             past_key_values=past_key_values,
                             attention_mask=torch.ones(next_token.shape[0], 1+past_key_values[0][0].shape[2], dtype=torch.long, device=self.device),
@@ -544,8 +552,12 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             past_key_values = outputs.past_key_values
             logits_prev_step = outputs.logits[:, -1, :]
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
+            e = time.time()
+            cur_step_time = e-s
+            decoding_times.append(cur_step_time)
             cur_pos_id += 1
         decoded_output = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+        if report_decoding_latency: print(f"Per-step decoding latency: {statistics.mean(decoding_times[1:]):.3f}")
         return decoded_output
     elif kv_mode == 'encoding_decoding':
         """
@@ -556,7 +568,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         white_lst = ['random', 'recency', 'tova', 'h2o_head_std_avg']
         assert mode in white_lst, f"mode must be within {white_lst}, get {mode} instead"
         # In case budget is also large, the attention_map will occupy a lot of memory
-        # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
+        # We offload attention_map to CPU first and move it layer by layer to GPU to compute eviction score
         if 'llama' in self.config.architectures[0].lower():
             modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
         else:
@@ -568,7 +580,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             if budget >= length: budget -= stride
         for idx in range(budget, -1, -1):
             if (length-idx)%stride==0: break
-        for r_idx in range(0, idx):
+        for r_idx in range(1, idx):
             if (idx-r_idx)%stride==0: break
         # prefix = input_ids[:, :idx]
         prefix = input_ids[:, :r_idx]
@@ -629,23 +641,24 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                 tl = outputs.attentions[l].shape[3]
                 outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
 
-            # update accumulated attention scores
-            if 'h2o_head' == mode or 'h2o_head_avg' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-            elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
-                    attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                    cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
-            elif 'tova' == mode:
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
-            # evict if current kv cache size exceeds the budget
             cur_kv_size = past_key_values[0][0].shape[2]
+            if cur_kv_size>idx or keep_attention:
+                # update accumulated attention scores
+                if 'h2o_head' == mode or 'h2o_head_avg' == mode:
+                    for l in range(num_layers):
+                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
+                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                    for l in range(num_layers):
+                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
+                        attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
+                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                        cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
+                elif 'tova' == mode:
+                    for l in range(num_layers):
+                        attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                        cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
+            # evict if current kv cache size exceeds the budget
             if mode != 'full' and cur_kv_size>idx:
                 cache_counter += float(stride)
                 cache_counter_token += float(stride)
@@ -954,9 +967,9 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             ppl = math.exp(statistics.mean(log_probs))
             return ppl
 
-def enable_fixed_kv(model, tokenizer, mode, stride=1):
+def enable_fixed_kv(model, tokenizer, mode, stride=1, verbose=False):
     model.tokenizer = tokenizer
     import functools
-    model.easykv_generate = functools.partial(generate, self=model, kv_mode=mode, stride=stride)
+    model.easykv_generate = functools.partial(generate, self=model, kv_mode=mode, stride=stride, report_decoding_latency=verbose)
     model.easykv_ppl = functools.partial(generate, self=model, kv_mode='ppl', stride=stride)
     print(f"Fixed KV Cache for {mode} enabled")
