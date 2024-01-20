@@ -151,17 +151,17 @@ def h2o_head_prob_score(attention_map, device, probs, mode:str='v1'):
     return cache_attn_scores, cache_attn_scores_square
 
 def h2o_head_score(attention_map, device, stride, budget, num_layers, num_heads, empty=False):
-    if attention_map is not None:
-        attention_map = list(attention_map)
-        num_layers = len(attention_map)
-        budget = attention_map[0].shape[-1]
+    # if attention_map is not None:
+    #     attention_map = list(attention_map)
+    #     num_layers = len(attention_map)
+    #     budget = attention_map[0].shape[-1]
     cache_attn_scores = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
     cache_attn_scores_square = torch.tensor([[[0.0]*(budget+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=device)
     if not empty:
         for l in range(num_layers):
             attention_map[l] = attention_map[l].to('cuda')
-            cache_attn_scores[l, :, :-stride] = torch.sum(attention_map[l][0], dim=1)
-            cache_attn_scores_square[l, :, :-stride] = torch.sum(attention_map[l][0]**2, dim=1)
+            cache_attn_scores[l, :, :attention_map[l].shape[-1]] = torch.sum(attention_map[l][0], dim=1)
+            cache_attn_scores_square[l, :, :attention_map[l].shape[-1]] = torch.sum(attention_map[l][0]**2, dim=1)
             attention_map[l] = None
     return cache_attn_scores, cache_attn_scores_square
 
@@ -558,9 +558,9 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         # In case budget is also large, the attention_map will occupy a lot of memory
         # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
         if 'llama' in self.config.architectures[0].lower():
-            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
         else:
-            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
         if type(budget) == float:
             budget = int(length * budget) + stride
         elif type(budget) == int: 
@@ -568,7 +568,10 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
             if budget >= length: budget -= stride
         for idx in range(budget, -1, -1):
             if (length-idx)%stride==0: break
-        prefix = input_ids[:, :idx]
+        for r_idx in range(0, idx):
+            if (idx-r_idx)%stride==0: break
+        # prefix = input_ids[:, :idx]
+        prefix = input_ids[:, :r_idx]
         recent_window = int(budget*recent_ratio)
         sink_length = temp_length
         outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
@@ -605,7 +608,8 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
         cur_pos_id = past_key_values[0][0].shape[2]
         evicted_positions = []
         log_probs = []
-        for token_i in range(idx, length, stride):
+        # for token_i in range(idx, length, stride):
+        for token_i in range(r_idx, length, stride):
             n += stride
             outputs = self(input_ids=input_ids[:, token_i:token_i+stride],
                             past_key_values=past_key_values,
@@ -642,7 +646,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1):
                     cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
             # evict if current kv cache size exceeds the budget
             cur_kv_size = past_key_values[0][0].shape[2]
-            if mode != 'full':
+            if mode != 'full' and cur_kv_size>idx:
                 cache_counter += float(stride)
                 cache_counter_token += float(stride)
                 if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
