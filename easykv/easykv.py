@@ -193,6 +193,7 @@ def process_for_mqa_gqa(attentions, num_layers, num_heads, rep_n):
         sl = attentions[l].shape[2]
         tl = attentions[l].shape[3]
         attentions[l] = attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+    return attentions
 
 
 @torch.inference_mode()
@@ -450,7 +451,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             if keep_attention:
-                process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
+                outputs_prefilling.attentions = process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
             cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
             # Back to GPU
             if 'llama' in self.config.architectures[0].lower():
@@ -485,7 +486,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
-                process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
+                outputs.attentions = process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
                 cur_kv_size = past_key_values[0][0].shape[2]
                 # update accumulated attention scores
@@ -639,7 +640,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
         prefix_token_lst = input_ids[0].cpu().numpy().tolist()
         cache_tokens = prefix[0].cpu().numpy().tolist()
         if keep_attention:
-            process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
+            outputs_prefilling.attentions = process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
         cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
         # Back to GPU
         if 'llama' in self.config.architectures[0].lower():
@@ -674,7 +675,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
             # Unified processing for MQA, GQA and MHA
-            process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
+            outputs.attentions = process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
             cur_kv_size = past_key_values[0][0].shape[2]
             if cur_kv_size>idx or keep_attention:
@@ -879,7 +880,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             if keep_attention:
-                process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
+                outputs_prefilling.attentions = process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
             cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
             # Back to GPU
             if 'llama' in self.config.architectures[0].lower():
@@ -915,7 +916,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
-                process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
+                outputs.attentions = process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
