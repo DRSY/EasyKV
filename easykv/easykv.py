@@ -4,8 +4,8 @@ import math
 import statistics
 from functools import partial
 from .utils import modify_method_of_instance
-from .llama_patch import llama_forward
-from .mistral_patch import mistral_forward
+from .llama_patch import llama_forward, llama_forward_stream
+from .mistral_patch import mistral_forward, mistral_forward_stream
 
 def cache_size(kv_cache):
     """
@@ -79,6 +79,26 @@ def truncate_kv_cache_liso(kv_cache, eviction_ids):
         mask = torch.ones(num_heads, l, device=kv_cache[0][0].device).scatter(dim=-1, index=eviction_ids[i], src=src_).bool()
         kv_cache[i][0] = kv_cache[i][0][0][mask, ...].view(1, num_heads, -1, head_dim)
         kv_cache[i][1] = kv_cache[i][1][0][mask, ...].view(1, num_heads, -1, head_dim)
+    return kv_cache
+
+def truncate_kv_cache_liso_mean(kv_cache, eviction_ids):
+    """
+    eviction_ids: (num_layers, num_heads, k+1)
+    """
+    kv_cache = list(kv_cache)
+    for i in range(len(kv_cache)):
+        kv_cache[i] = list(kv_cache[i])
+    l = kv_cache[0][0].shape[2]
+    head_dim = kv_cache[0][0].shape[-1]
+    num_heads = kv_cache[0][0].shape[1]
+    for i in range(eviction_ids.shape[0]):
+        src_ = torch.zeros(num_heads, eviction_ids.shape[-1]).to(kv_cache[0][0].device)
+        mask = torch.ones(num_heads, l, device=kv_cache[0][0].device).scatter(dim=-1, index=eviction_ids[i], src=src_).bool()
+        evicted_mask = ~mask
+        key_evicted_mean = torch.mean(kv_cache[i][0][0][evicted_mask, ...].view(1, num_heads, -1, head_dim), dim=2, keepdim=True)
+        value_evicted_mean = torch.mean(kv_cache[i][1][0][evicted_mask, ...].view(1, num_heads, -1, head_dim), dim=2, keepdim=True)
+        kv_cache[i][0] = torch.cat((kv_cache[i][0][0][mask, ...].view(1, num_heads, -1, head_dim), key_evicted_mean), dim=2)
+        kv_cache[i][1] = torch.cat((kv_cache[i][1][0][mask, ...].view(1, num_heads, -1, head_dim), value_evicted_mean), dim=2)
     return kv_cache
 
 
@@ -165,6 +185,15 @@ def h2o_head_score(attention_map, device, stride, budget, num_layers, num_heads,
             attention_map[l] = None
     return cache_attn_scores, cache_attn_scores_square
 
+def process_for_mqa_gqa(attentions, num_layers, num_heads, rep_n):
+    # Unified processing for MQA, GQA and MHA
+    attentions = list(attentions)
+    for l in range(num_layers):
+        bs = attentions[l].shape[0]
+        sl = attentions[l].shape[2]
+        tl = attentions[l].shape[3]
+        attentions[l] = attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+
 
 @torch.inference_mode()
 def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, report_decoding_latency: bool=False):
@@ -177,6 +206,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
     recent_ratio = generation_config.get('recent_ratio', 0.1)
     keep_attention = generation_config.get('keep_attention', False)
     eos_token_ids = generation_config.get('eos_token_ids', [self.tokenizer.eos_token_id])
+    streaming = generation_config.get('streaming', False)
     num_layers = self.config.num_hidden_layers
     if not hasattr(self.config, "num_key_value_heads"): num_heads = self.config.num_attention_heads
     else: num_heads = self.config.num_key_value_heads
@@ -220,6 +250,10 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
         token_probs = []
         cur_pos_id = past_key_values[0][0].shape[2]
         evicted_positions = []
+        if 'llama' in self.config.architectures[0].lower():
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
+        else:
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
         while n < max_new_tokens:
             next_token = torch.multinomial(prob_prev_step, num_samples=1)
             output_ids.append(next_token[0, 0].cpu().item())
@@ -394,18 +428,17 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             # In case budget is also large, the attention_map will occupy a lot of memory
             # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
             if type(budget) == float:
                 budget = int(length * budget) + stride
             elif type(budget) == int: 
                 budget += stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
-            for r_idx in range(1, idx):
+            for r_idx in range(idx-1, -1, -1):
                 if (idx-r_idx)%stride==0: break
-            # prefix = input_ids[:, :idx]
             prefix = input_ids[:, :r_idx]
             recent_window = int(budget*recent_ratio)
             sink_length = temp_length
@@ -417,18 +450,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             if keep_attention:
-                outputs_prefilling.attentions = list(outputs_prefilling.attentions)
-                for l in range(num_layers):
-                    bs = outputs_prefilling.attentions[l].shape[0]
-                    sl = outputs_prefilling.attentions[l].shape[2]
-                    tl = outputs_prefilling.attentions[l].shape[3]
-                    outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+                process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
             cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
             # Back to GPU
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
 
             if keep_attention:
                 cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -457,12 +485,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
-                outputs.attentions = list(outputs.attentions)
-                for l in range(num_layers):
-                    bs = outputs.attentions[l].shape[0]
-                    sl = outputs.attentions[l].shape[2]
-                    tl = outputs.attentions[l].shape[3]
-                    outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+                process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
                 cur_kv_size = past_key_values[0][0].shape[2]
                 # update accumulated attention scores
@@ -471,7 +494,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
                             cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                             attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
@@ -479,7 +502,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                             cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
                     elif 'tova' == mode:
                         for l in range(num_layers):
-                            attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
+                            attention_map = outputs.attentions[l][0, :, -1, :].mean(dim=0).unsqueeze(0).repeat(num_heads, 1) # (num_heads, l)
                             cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
                 # evict if current kv cache size exceeds the budget
                 if mode != 'full' and cur_kv_size>idx:
@@ -501,6 +524,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
                         _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
+                        # _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-int(budget*0.1)-sink_length, stride), dim=-1) # (layers, heads, k)
                         if 'avg' in mode:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
                         else:
@@ -513,6 +537,27 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
+                    elif mode in ['h2o_head_std_avg_cp']:
+                        cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
+                        cur_std[:, :, -10:] = 1e9
+                        cur_std[:, :, :sink_length] = 1e9
+                        _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
+                        if 'avg' in mode:
+                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
+                        else:
+                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
+                        eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
+                        past_key_values = truncate_kv_cache_liso_mean(past_key_values, eviction_ids)
+                        _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                        _src = torch.zeros(num_layers, num_heads, stride+1, device=self.device).view(num_layers*num_heads, -1)
+                        mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                        evicted_mask = ~mask
+                        evicted_cache_attn_scores = cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        evicted_cache_attn_scores_square = cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        evicted_cache_counter = cache_counter.view(-1, cache_counter.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                        cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores_square, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                        cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_counter, (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
                     elif mode == 'tova':
                         eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
@@ -570,9 +615,9 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
         # In case budget is also large, the attention_map will occupy a lot of memory
         # We offload attention_map to CPU first and move it layer by layer to GPU to compute eviction score
         if 'llama' in self.config.architectures[0].lower():
-            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
         else:
-            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
         if type(budget) == float:
             budget = int(length * budget) + stride
         elif type(budget) == int: 
@@ -594,18 +639,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
         prefix_token_lst = input_ids[0].cpu().numpy().tolist()
         cache_tokens = prefix[0].cpu().numpy().tolist()
         if keep_attention:
-            outputs_prefilling.attentions = list(outputs_prefilling.attentions)
-            for l in range(num_layers):
-                bs = outputs_prefilling.attentions[l].shape[0]
-                sl = outputs_prefilling.attentions[l].shape[2]
-                tl = outputs_prefilling.attentions[l].shape[3]
-                outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+            process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
         cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
         # Back to GPU
         if 'llama' in self.config.architectures[0].lower():
-            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+            modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
         else:
-            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+            modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
 
         if keep_attention:
             cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -634,12 +674,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
             # Unified processing for MQA, GQA and MHA
-            outputs.attentions = list(outputs.attentions)
-            for l in range(num_layers):
-                bs = outputs.attentions[l].shape[0]
-                sl = outputs.attentions[l].shape[2]
-                tl = outputs.attentions[l].shape[3]
-                outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+            process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
             cur_kv_size = past_key_values[0][0].shape[2]
             if cur_kv_size>idx or keep_attention:
@@ -756,7 +791,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             cache_counter += 1.0
             recent_ratio = 0.3
             recent_window = int(budget*recent_ratio)
-            if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob', 'h2o_head_prob_avg', 'h2o_head_probv2', 'h2o_head_probv2_avg', 'h2o_head_decay_prob', 'h2o_head_decay_probv2', 'h2o_head_decay_prob_avg', 'h2o_head_decay_probv2_avg']:
+            if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob']:
                 if not 'avg' in mode:
                     eviction_ids = torch.argmin(cache_attn_scores[:, :, :-recent_window], dim=-1)
                 else:
@@ -824,9 +859,9 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             # In case budget is also large, the attention_map will occupy a lot of memory
             # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cpu'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cpu'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cpu'))
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cpu'))
             budget = int(length * budget) + stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
@@ -844,18 +879,13 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
             cache_tokens = prefix[0].cpu().numpy().tolist()
             if keep_attention:
-                outputs_prefilling.attentions = list(outputs_prefilling.attentions)
-                for l in range(num_layers):
-                    bs = outputs_prefilling.attentions[l].shape[0]
-                    sl = outputs_prefilling.attentions[l].shape[2]
-                    tl = outputs_prefilling.attentions[l].shape[3]
-                    outputs_prefilling.attentions[l] = outputs_prefilling.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+                process_for_mqa_gqa(outputs_prefilling.attentions, num_layers, num_heads, rep_n)
             cache_attn_scores, cache_attn_scores_square = h2o_head_score(outputs_prefilling.attentions, self.device, stride, idx, num_layers, num_heads, empty=not keep_attention)
             # Back to GPU
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward, attn_device='cuda'))
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
 
             if keep_attention:
                 cache_counter = torch.tensor([[[1.0]*(idx+stride) for _ in range(num_heads)] for _ in range(num_layers)], device=self.device)
@@ -885,19 +915,14 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 prob_prev_step, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
 
                 # Unified processing for MQA, GQA and MHA
-                outputs.attentions = list(outputs.attentions)
-                for l in range(num_layers):
-                    bs = outputs.attentions[l].shape[0]
-                    sl = outputs.attentions[l].shape[2]
-                    tl = outputs.attentions[l].shape[3]
-                    outputs.attentions[l] = outputs.attentions[l].reshape(bs, num_heads, rep_n, sl, tl).mean(dim=2) # (bs, num_kv_heads, sl, tl)
+                process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
 
                 # update accumulated attention scores
                 if 'h2o_head' == mode or 'h2o_head_avg' == mode:
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                         attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
@@ -940,6 +965,27 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
+                    elif mode in ['h2o_head_std_avg_cp']:
+                        cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
+                        cur_std[:, :, -10:] = 1e9
+                        cur_std[:, :, :sink_length] = 1e9
+                        _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
+                        if 'avg' in mode:
+                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
+                        else:
+                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
+                        eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
+                        past_key_values = truncate_kv_cache_liso_mean(past_key_values, eviction_ids)
+                        _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
+                        _src = torch.zeros(num_layers, num_heads, stride+1, device=self.device).view(num_layers*num_heads, -1)
+                        mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
+                        evicted_mask = ~mask
+                        evicted_cache_attn_scores = cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        evicted_cache_attn_scores_square = cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        evicted_cache_counter = cache_counter.view(-1, cache_counter.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
+                        cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                        cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores_square, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
+                        cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_counter, (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
                     elif mode == 'tova':
                         eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)

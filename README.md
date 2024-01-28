@@ -19,6 +19,7 @@ EasyKV is a Pytorch package dedicated for ***key-value cache constrained*** gene
 </p>
 
 ## Update
++ [2024.1.28] Add support for streaming mode by setting ```streaming``` in generation config to ```True```.
 + [2024.1.19] Add support for stopping condition during generation.
 + [2024.1.17] Add ```auto``` mode. See [example](#auto-mode).
 + [2024.1.17] Add examples for [perplexity computation](#perplexity) using LLaMa2-13B and DynamicNTK.
