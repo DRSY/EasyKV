@@ -860,21 +860,23 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             # In case budget is also large, the attention_map will occupy a lot of memory
             # We offload attention_map to CPU first and move it layer by laer to GPU to compute eviction score
             if 'llama' in self.config.architectures[0].lower():
-                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cpu'))
+                modify_method_of_instance(self, "LlamaAttention", "forward", partial(llama_forward if not streaming else llama_forward_stream, attn_device='cuda'))
             else:
-                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cpu'))
-            budget = int(length * budget) + stride
+                modify_method_of_instance(self, "MistralAttention", "forward", partial(mistral_forward if not streaming else mistral_forward_stream, attn_device='cuda'))
+            if type(budget) == float:
+                budget = int(length * budget) + stride
+            elif type(budget) == int: 
+                budget += stride
             for idx in range(budget, -1, -1):
                 if (length-idx)%stride==0: break
-            prefix = input_ids[:, :idx]
+            for r_idx in range(1, idx):
+                if (idx-r_idx)%stride==0: break
+            prefix = input_ids[:, :r_idx]
             recent_window = int(budget*recent_ratio)
             sink_length = temp_length
             outputs_prefilling = self(input_ids=prefix, use_cache=True, output_attentions=keep_attention)
             past_key_values, logits = outputs_prefilling.past_key_values, outputs_prefilling.logits
-            all_ids = [prefix[0]]
-            all_logits = [outputs_prefilling.logits[0]]
             loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-            loss = loss_fct(logits[:, :-1].view(-1, logits.shape[-1]), prefix[:, 1:].clone().view(-1))
             logits_prev_step = logits[:, -1, :]
             _, raw_prob_prev_step = logits_adapter(logits_prev_step, temperature, top_p)
             prefix_token_lst = input_ids[0].cpu().numpy().tolist()
@@ -901,7 +903,10 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             cur_pos_id = past_key_values[0][0].shape[2]
             evicted_positions = []
             log_probs = []
-            for token_i in range(idx, length, stride):
+            all_logits = []
+            all_ids = []
+            # for token_i in range(idx, length, stride):
+            for token_i in range(r_idx, length, stride):
                 n += stride
                 outputs = self(input_ids=input_ids[:, token_i:token_i+stride],
                                 past_key_values=past_key_values,
@@ -917,25 +922,25 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
 
                 # Unified processing for MQA, GQA and MHA
                 outputs.attentions = process_for_mqa_gqa(outputs.attentions, num_layers, num_heads, rep_n)
-
-                # update accumulated attention scores
-                if 'h2o_head' == mode or 'h2o_head_avg' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
-                        attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                        cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
-                elif 'tova' == mode:
-                    for l in range(num_layers):
-                        attention_map = outputs.attentions[l][0, :, -1, :] # (num_heads, l)
-                        cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
-                # evict if current kv cache size exceeds the budget
                 cur_kv_size = past_key_values[0][0].shape[2]
-                if mode != 'full':
+                # update accumulated attention scores
+                if cur_kv_size>idx or keep_attention:
+                    if 'h2o_head' == mode or 'h2o_head_avg' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
+                            attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
+                            cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map_sq
+                    elif 'tova' == mode:
+                        for l in range(num_layers):
+                            attention_map = outputs.attentions[l][0, :, -1, :].mean(dim=0).unsqueeze(0).repeat(num_heads, 1) # (num_heads, l)
+                            cache_attn_scores[l, :, :attention_map.shape[-1]] = attention_map
+                # evict if current kv cache size exceeds the budget
+                if mode != 'full' and cur_kv_size>idx:
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
                     if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
@@ -954,6 +959,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
                         _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
+                        # _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-int(budget*0.1)-sink_length, stride), dim=-1) # (layers, heads, k)
                         if 'avg' in mode:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
                         else:
