@@ -19,6 +19,7 @@ EasyKV is a Pytorch package dedicated for ***key-value cache constrained*** gene
 </p>
 
 ## Update
++ [2024.2.12] The paper of EasyKV is now available on arxiv(https://arxiv.org/abs/2402.06262).
 + [2024.1.28] Add support for streaming mode by setting ```streaming``` in generation config to ```True```.
 + [2024.1.19] Add support for stopping condition during generation.
 + [2024.1.17] Add ```auto``` mode. See [example](#auto-mode).
