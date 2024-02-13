@@ -354,4 +354,11 @@ EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
   journal={arXiv preprint arXiv:2306.14048},
   year={2023}
 }
+
+@article{oren2024transformers,
+  title={Transformers are Multi-State RNNs},
+  author={Oren, Matanel and Hassid, Michael and Adi, Yossi and Schwartz, Roy},
+  journal={arXiv preprint arXiv:2401.06104},
+  year={2024}
+}
 ```
