@@ -338,7 +338,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                     cur_std[:, :, -10:] = 1e9
                     _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window, dim=-1) # (layers, heads, k)
-                    if 'avg' in mode:
+                    if 'roco' in mode:
                         argmin_id = torch.argmin(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1).unsqueeze(-1) # (layers, heads)
                     else:
                         argmin_id = torch.argmin(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1).unsqueeze(-1) # (layers, heads)
@@ -497,8 +497,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
                         _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
-                        # _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-int(budget*0.1)-sink_length, stride), dim=-1) # (layers, heads, k)
-                        if 'avg' in mode:
+                        if 'roco' in mode:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
                         else:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
@@ -665,7 +664,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     cur_std[:, :, -10:] = 1e9
                     cur_std[:, :, :sink_length] = 1e9
                     _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
-                    if 'avg' in mode:
+                    if 'roco' in mode:
                         argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
                     else:
                         argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
@@ -911,7 +910,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cur_std[:, :, :sink_length] = 1e9
                         _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
                         # _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-int(budget*0.1)-sink_length, stride), dim=-1) # (layers, heads, k)
-                        if 'avg' in mode:
+                        if 'roco' in mode:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
                         else:
                             argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride)[1] # (layers, heads)
