@@ -323,8 +323,7 @@ EasyKV-h2o_head_std_avg-50.00% PPL: 7.47
 + recency: similar to StreamingLLM, dropping the least recent token's kv cache.
 + h2o_head: Heavy-hitter oracle, which drops kv cache whose accumulated attention score is smallest.
 + tova: Token Omission Via Attention, which uses attention weights of the last token only.
-+ h2o_head_std_avg(for encoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
-+ h2o_head_decay_avg_std(for decoding mode only): newly proposed eviction policy with better evivtion candidate selection and importance estimation.
++ roco: newly proposed eviction policy with better evivtion candidate selection and importance estimation.
 
 
 ## Todos
