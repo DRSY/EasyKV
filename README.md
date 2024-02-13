@@ -72,7 +72,7 @@ prompt = f"Write a SHORT summary of the following text delimited by triple backt
 input_prompt = template.format(inst=prompt)
 
 # Define eviction policy
-kv_policy = 'h2o_head_std_avg'
+kv_policy = 'roco'
 # Define sampling parameters
 gen_kwargs = dict(
     temperature=1e-9,
@@ -106,7 +106,7 @@ enable_fixed_kv(model, tokenizer, mode='decoding', stride=1)
 # Test input
 prompt = f"What are the names of some famous actors that started their careers on Broadway?"
 input_prompt = template.format(inst=prompt)
-kv_policy = 'h2o_head_decay_avg_std'
+kv_policy = 'roco'
 # Define sampling parameters
 gen_kwargs = dict(
     temperature=1e-9,
@@ -124,7 +124,7 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 In case both the prompt and generation are long, ```auto``` mode can help automatically handle KV cache throught the prefilling and decoding stages.
 ```python
 stride = 64 # stride for sliding window
-kv_policy = "h2o_head_std_avg" # cache eviction policy
+kv_policy = "roco" # cache eviction policy
 budget = 1024 # an integer specifying the maximum KV cache
 enable_fixed_kv(model, tokenizer, mode='auto', stride=stride)
 gen_kwargs = dict(

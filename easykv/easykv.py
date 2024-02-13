@@ -290,23 +290,11 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-            elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+            elif 'h2o_head_std' == mode or 'roco' == mode:
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
                     cache_attn_scores_square[l, :, :attention_map.shape[-1]] += attention_map ** 2
-            elif 'h2o_head_decay' == mode or 'h2o_head_decay_avg' == mode:
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
-            elif 'h2o_head_decay_avg_std' == mode:
-                a = 0.96
-                for l in range(num_layers):
-                    attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
-                    cache_attn_scores[l, :, :attention_map.shape[-1]] = a * cache_attn_scores[l, :, :attention_map.shape[-1]] + (1-a) * attention_map
-                    cache_attn_scores_decay_avg_std[l, :, :attention_map.shape[-1]] += cache_attn_scores[l, :, :attention_map.shape[-1]]
-                    cache_attn_scores_square[l, :, :attention_map.shape[-1]] += (cache_attn_scores[l, :, :attention_map.shape[-1]])**2
             elif 'tova' == mode:
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, len(prefix_token_lst):] # (num_heads, l)
@@ -332,7 +320,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     cache_tokens.pop(evict_id)
                     cache_cur_probs.pop(evict_id)
                     cache_positions.pop(evict_id)
-                elif mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob', 'h2o_head_prob_avg', 'h2o_head_probv2', 'h2o_head_probv2_avg', 'h2o_head_decay_prob', 'h2o_head_decay_probv2', 'h2o_head_decay_prob_avg', 'h2o_head_decay_probv2_avg']:
+                elif mode in ['h2o_head', 'h2o_head_avg']:
                     if not 'avg' in mode:
                         eviction_ids = torch.argmin(cache_attn_scores[:, :, :-recent_window], dim=-1) + len(prefix_token_lst)
                     else:
@@ -346,7 +334,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                     if 'avg' in mode:
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-                elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                elif mode in ['h2o_head_std', 'roco']:
                     cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                     cur_std[:, :, -10:] = 1e9
                     _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window, dim=-1) # (layers, heads, k)
@@ -365,22 +353,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                     if 'avg' in mode:
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-                elif mode in ['h2o_head_decay_avg_std']:
-                    cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores_decay_avg_std / cache_counter)**2)
-                    cur_std[:, :, -10:] = 1e9
-                    _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window, dim=-1) # (layers, heads, k)
-                    argmin_id = torch.argmin(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1).unsqueeze(-1) # (layers, heads)
-                    eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id).squeeze(-1) + len(prefix_token_lst)
-                    _eviction_ids = eviction_ids
-                    eviction_ids = eviction_ids.cpu().numpy().tolist()
-                    past_key_values = truncate_kv_cache_silo(past_key_values, eviction_ids)
-                    _index = torch.arange(cache_attn_scores.shape[-1], device=self.device).unsqueeze(0).unsqueeze(0).repeat(num_layers, num_heads, 1)
-                    _eviction_ids -= len(prefix_token_lst)
-                    mask = (_eviction_ids.unsqueeze(-1)!=_index).view(-1, _index.shape[-1])
-                    cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-                    cache_attn_scores_decay_avg_std = torch.cat((cache_attn_scores_decay_avg_std.view(-1, cache_attn_scores_decay_avg_std.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-                    cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-                    cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, _index.shape[-1]-1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                 elif mode == 'tova':
                     eviction_ids = torch.argmin(cache_attn_scores, dim=-1) + len(prefix_token_lst)
                     _eviction_ids = eviction_ids
@@ -495,7 +467,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
                             cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
+                    elif 'h2o_head_std' == mode or 'roco' == mode:
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                             attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
@@ -509,7 +481,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 if mode != 'full' and cur_kv_size>idx:
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
-                    if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
+                    if mode in ['h2o_head', 'h2o_head_avg']:
                         if not 'avg' in mode:
                             eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         else:
@@ -520,7 +492,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                    elif mode in ['h2o_head_std', 'roco']:
                         cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
@@ -538,27 +510,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std_avg_cp']:
-                        cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
-                        cur_std[:, :, -10:] = 1e9
-                        cur_std[:, :, :sink_length] = 1e9
-                        _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
-                        if 'avg' in mode:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
-                        else:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
-                        eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
-                        past_key_values = truncate_kv_cache_liso_mean(past_key_values, eviction_ids)
-                        _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
-                        _src = torch.zeros(num_layers, num_heads, stride+1, device=self.device).view(num_layers*num_heads, -1)
-                        mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
-                        evicted_mask = ~mask
-                        evicted_cache_attn_scores = cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        evicted_cache_attn_scores_square = cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        evicted_cache_counter = cache_counter.view(-1, cache_counter.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores_square, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_counter, (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
                     elif mode == 'tova':
                         eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
@@ -611,7 +562,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
         """
         length = input_ids.shape[-1]
         assert type(budget) == int and budget <= length
-        white_lst = ['random', 'recency', 'tova', 'h2o_head_std_avg']
+        white_lst = ['random', 'recency', 'tova', 'roco']
         assert mode in white_lst, f"mode must be within {white_lst}, get {mode} instead"
         # In case budget is also large, the attention_map will occupy a lot of memory
         # We offload attention_map to CPU first and move it layer by layer to GPU to compute eviction score
@@ -684,7 +635,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
                         cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+                elif 'h2o_head_std' == mode or 'roco' == mode:
                     for l in range(num_layers):
                         attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                         attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
@@ -698,7 +649,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             if mode != 'full' and cur_kv_size>idx:
                 cache_counter += float(stride)
                 cache_counter_token += float(stride)
-                if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
+                if mode in ['h2o_head', 'h2o_head_avg']:
                     if not 'avg' in mode:
                         eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                     else:
@@ -709,7 +660,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                     mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                     cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                     cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                elif mode in ['h2o_head_std', 'roco']:
                     cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                     cur_std[:, :, -10:] = 1e9
                     cur_std[:, :, :sink_length] = 1e9
@@ -779,7 +730,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, :]
                     cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-            elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode:
+            elif 'h2o_head_std' == mode or 'roco' == mode:
                 for l in range(num_layers):
                     attention_map = outputs.attentions[l][0, :, 0, :]
                     attention_map_sq = ((outputs.attentions[l][0, :, 0, :])**2)
@@ -792,7 +743,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
             cache_counter += 1.0
             recent_ratio = 0.3
             recent_window = int(budget*recent_ratio)
-            if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg', 'h2o_head_prob']:
+            if mode in ['h2o_head', 'h2o_head_avg']:
                 if not 'avg' in mode:
                     eviction_ids = torch.argmin(cache_attn_scores[:, :, :-recent_window], dim=-1)
                 else:
@@ -805,7 +756,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
                 if 'avg' in mode:
                     cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, 1, device=self.device)), dim=-1)
-            elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+            elif mode in ['h2o_head_std', 'roco']:
                 cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                 cur_std[:, :, -10:] = 1e9
                 _, feasible_ids = torch.topk(cur_std, largest=False, k=budget-recent_window, dim=-1) # (layers, heads, k)
@@ -929,7 +880,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, stride, stride+l)
                             cache_attn_scores[l, :, :attention_map.shape[-1]] += attention_map
-                    elif 'h2o_head_std' == mode or 'h2o_head_std_avg' == mode or 'h2o_head_std_avg_cp' == mode:
+                    elif 'h2o_head_std' == mode or 'roco' == mode:
                         for l in range(num_layers):
                             attention_map = outputs.attentions[l][0, :, :, :].sum(dim=1) # (num_heads, l)
                             attention_map_sq = ((outputs.attentions[l][0, :, :, :])**2).sum(dim=1)
@@ -943,7 +894,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                 if mode != 'full' and cur_kv_size>idx:
                     cache_counter += float(stride)
                     cache_counter_token += float(stride)
-                    if mode in ['h2o_head', 'h2o_head_decay', 'h2o_head_avg', 'h2o_head_decay_avg']:
+                    if mode in ['h2o_head', 'h2o_head_avg']:
                         if not 'avg' in mode:
                             eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         else:
@@ -954,7 +905,7 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std', 'h2o_head_std_avg']:
+                    elif mode in ['h2o_head_std', 'roco']:
                         cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
                         cur_std[:, :, -10:] = 1e9
                         cur_std[:, :, :sink_length] = 1e9
@@ -972,27 +923,6 @@ def generate(self, input_ids, generation_config, kv_mode='encoding', stride=1, r
                         cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
                         cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
-                    elif mode in ['h2o_head_std_avg_cp']:
-                        cur_std = torch.sqrt(cache_attn_scores_square / cache_counter - (cache_attn_scores / cache_counter)**2)
-                        cur_std[:, :, -10:] = 1e9
-                        cur_std[:, :, :sink_length] = 1e9
-                        _, feasible_ids = torch.topk(cur_std, largest=False, k=max(budget-recent_window-sink_length, stride), dim=-1) # (layers, heads, k)
-                        if 'avg' in mode:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids) / cache_counter.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
-                        else:
-                            argmin_id = torch.topk(cache_attn_scores.gather(dim=-1, index=feasible_ids), dim=-1, largest=False, k=stride+1)[1] # (layers, heads)
-                        eviction_ids = feasible_ids.gather(dim=-1, index=argmin_id)
-                        past_key_values = truncate_kv_cache_liso_mean(past_key_values, eviction_ids)
-                        _index = torch.ones(num_layers, num_heads, cache_attn_scores.shape[-1], device=self.device).view(num_layers*num_heads, -1)
-                        _src = torch.zeros(num_layers, num_heads, stride+1, device=self.device).view(num_layers*num_heads, -1)
-                        mask = _index.scatter(dim=-1, index=eviction_ids.view(num_layers*num_heads, -1), src=_src).bool()
-                        evicted_mask = ~mask
-                        evicted_cache_attn_scores = cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        evicted_cache_attn_scores_square = cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        evicted_cache_counter = cache_counter.view(-1, cache_counter.shape[-1])[evicted_mask].view(num_layers*num_heads, -1).mean(dim=-1).view(num_layers, num_heads, 1)
-                        cache_attn_scores = torch.cat((cache_attn_scores.view(-1, cache_attn_scores.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_attn_scores_square = torch.cat((cache_attn_scores_square.view(-1, cache_attn_scores_square.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_attn_scores_square, torch.zeros(num_layers, num_heads, stride, device=self.device)), dim=-1)
-                        cache_counter = torch.cat((cache_counter.view(-1, cache_counter.shape[-1])[mask].view(num_layers, num_heads, -1), evicted_cache_counter, (torch.arange(stride)-stride+1).view(1, 1, -1).repeat(num_layers, num_heads, 1).flip(dims=(2,)).to(self.device)), dim=-1)
                     elif mode == 'tova':
                         eviction_ids = torch.topk(cache_attn_scores[:, :, sink_length:-recent_window], dim=-1, k=stride, largest=False)[1] + sink_length
                         past_key_values = truncate_kv_cache_liso(past_key_values, eviction_ids)
