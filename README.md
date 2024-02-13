@@ -48,15 +48,12 @@ from easykv import enable_fixed_kv
 ```
 
 ## Example Usage
-There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding. Firstly, some necessary patches to ```transformers``` are required (minor changes to RoPE to make it compatible with asynchronous position_ids and key-value length).
-```python
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from easykv import enable_fixed_kv
-``` 
+There are two different phases in LLM generative inference, i.e., prompt encoding and auto-regressive decoding. 
 ### Prompt Encoding/Prefilling
 For prefilling stage, please specify ```budget``` in the range of (0,1), e.g., 0.5, which leads to 50% savings in KV cache memory footprint.
 ```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Define your model path and template in a dict MODEL_CONFIGS
 model_name = 'zephyr_7b'
@@ -93,6 +90,9 @@ print(f"{'='*20} {kv_policy} {'='*20}\n{output}")
 ### Auto-regressive Decoding
 For auto-regressive decoding phase, please specify ```budget``` as an integer, which represents the maximum length of KV cache, e.g, 200.
 ```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 # Define your model path and template in a dict MODEL_CONFIGS
 model_name = 'llama2_7b_chat'
 path = MODEL_CONFIGS[model_name]['path']
