@@ -47,7 +47,7 @@ print("Input token length:", input_ids.shape[-1])
 budgets = [1.0, 0.5]
 for budget in budgets:
     # Define sampling parameters
-    for kv_policy in ['recency', 'h2o_head_std_avg']:
+    for kv_policy in ['recency', 'roco']:
         ppl_kwargs = dict(
             budget=budget,
             kv_policy=kv_policy,

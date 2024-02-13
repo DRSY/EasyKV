@@ -39,7 +39,7 @@ tokenizer = AutoTokenizer.from_pretrained(path)
 set_dynamicntk_rope_length(model, 5200)
 
 # Define KV cache eviction policy
-kv_policy = "h2o_head_std_avg"
+kv_policy = "roco"
 
 enable_fixed_kv(model, tokenizer, mode='encoding', stride=24)
 

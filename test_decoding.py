@@ -33,7 +33,7 @@ inst = "What are the names of some famous actors that started their careers on B
 input_prompt = template.format(inst=inst)
 
 # Define eviction policy
-kv_policy = 'h2o_head_decay_avg_std'
+kv_policy = 'roco'
 
 for budget in [300, 150]:
     # Define sampling parameters

@@ -35,7 +35,7 @@ prompt = f"Write a SHORT summary of the following text delimited by triple backt
 input_prompt = template.format(inst=prompt)
 
 # Define eviction policy
-kv_policy = 'h2o_head_std_avg'
+kv_policy = 'roco'
 
 for budget in [1.0, 0.5]:
     # Define sampling parameters

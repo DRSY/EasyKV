@@ -33,7 +33,7 @@ model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, de
 tokenizer = AutoTokenizer.from_pretrained(path)
 
 # Define KV cache eviction policy
-kv_policy = "h2o_head_std_avg"
+kv_policy = "roco"
 
 enable_fixed_kv(model, tokenizer, mode='encoding', stride=96)
 
